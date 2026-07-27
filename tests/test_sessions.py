@@ -1,282 +1,243 @@
-"""tmux backend, exercised against a real tmux server on a private socket.
+"""Session manager, end to end against a real SSH server.
 
-These are skipped when tmux is unavailable rather than mocked away, because the
-whole point of the backend is the behaviour of the real thing.
+These go through the whole stack the way the app does: vault -> credential ->
+transport -> live SSH channel -> pyte emulator -> rendered cells.
 """
 
 from __future__ import annotations
 
-import os
-import shutil
-import uuid
-
+import paramiko
 import pytest
 
-from remotely.sessions import (
-    HOST_TAG,
-    SessionTab,
-    TmuxBackend,
-    TmuxError,
-    ensure_utf8_locale,
-    format_tab_lines,
-    hold_on_failure,
-    locale_supports_unicode,
-)
-from remotely.ssh import build_plan
+from remotely.models import Credential, Host
+from remotely.sessions import SessionError, SessionManager
 from remotely.themes import ThemeRegistry
+from remotely.vault import Vault
 
-from .conftest import make_host
+from .conftest import PASSCODE
+from .sshserver import PASSWORD, USERNAME, SSHTestServer, wait_for
 
-pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+
+@pytest.fixture(scope="module")
+def host_key() -> paramiko.PKey:
+    return paramiko.RSAKey.generate(2048)
 
 
 @pytest.fixture
-def backend():
-    socket = f"remotely-test-{uuid.uuid4().hex[:8]}"
-    backend = TmuxBackend(session_name="remotely-test", socket_name=socket)
-    yield backend
-    try:
-        backend.server.kill()
-    except Exception:
-        pass
+def server(host_key: paramiko.PKey):
+    with SSHTestServer(host_key=host_key) as running:
+        yield running
 
 
-def test_ensure_session_creates_it(backend: TmuxBackend) -> None:
-    assert not backend.session_exists()
-    backend.ensure_session("sleep 60")
-    assert backend.session_exists()
+@pytest.fixture
+def manager() -> SessionManager:
+    made = SessionManager()
+    yield made
+    made.close_all()
 
 
-def test_ensure_session_is_idempotent(backend: TmuxBackend) -> None:
-    first = backend.ensure_session("sleep 60")
-    second = backend.ensure_session("sleep 60")
-    assert first.session_name == second.session_name
-    assert len(backend.get_session().windows) == 1
-
-
-def test_open_tab_creates_a_window(backend: TmuxBackend, themes: ThemeRegistry) -> None:
-    backend.ensure_session("sleep 60")
-    host = make_host("prod-web", theme="prod")
-    plan = build_plan(host, None, ssh_binary="sleep")
-    plan.argv = ["sleep", "60"]
-
-    tab = backend.open_tab(host, plan, themes.get("prod"))
-    assert tab.host == "prod-web"
-    assert tab.theme == "prod"
-    assert "prod-web" in tab.name
-    assert len(backend.get_session().windows) == 2
-
-
-def test_theme_is_applied_to_the_window(backend: TmuxBackend, themes: ThemeRegistry) -> None:
-    backend.ensure_session("sleep 60")
-    host = make_host("prod-web", theme="prod")
-    plan = build_plan(host, None)
-    plan.argv = ["sleep", "60"]
-
-    tab = backend.open_tab(host, plan, themes.get("prod"))
-    window = next(
-        w for w in backend.get_session().windows if str(w.window_id) == tab.window_id
+def make_host(server: SSHTestServer, **overrides) -> Host:
+    defaults = dict(
+        name="testbox",
+        hostname=server.hostname,
+        username=USERNAME,
+        port=server.port,
+        theme="prod",
+        auth_mode="credential",
+        credential="pw",
     )
-    style = window.show_option("window-style")
-    assert style == themes.get("prod").tmux["window_style"]
+    defaults.update(overrides)
+    return Host(**defaults)
 
 
-def test_environment_reaches_the_session(backend: TmuxBackend, themes: ThemeRegistry, tmp_path) -> None:
-    backend.ensure_session("sleep 60")
-    marker = tmp_path / "env.txt"
-    host = make_host("envtest")
-    plan = build_plan(host, None)
-    plan.argv = ["sh", "-c", f"printf %s \"$REMOTELY_ASKPASS_FILE\" > {marker}; sleep 30"]
-    plan.env = {"REMOTELY_ASKPASS_FILE": "/tmp/expected-path"}
-
-    backend.open_tab(host, plan, themes.get("personal"))
-
-    import time
-
-    for _ in range(50):
-        if marker.exists() and marker.read_text():
-            break
-        time.sleep(0.1)
-    assert marker.read_text() == "/tmp/expected-path"
+def credential() -> Credential:
+    return Credential(name="pw", kind="password", password=PASSWORD)
 
 
-def test_list_tabs_only_reports_our_windows(
-    backend: TmuxBackend, themes: ThemeRegistry
+def connect(manager, server, themes, **overrides):
+    """Open a session and wait for the handshake to finish."""
+    host = make_host(server, **overrides)
+    session = manager.open(host, credential(), themes.get(host.theme), cols=80, rows=24)
+    assert wait_for(lambda: session.status != "connecting", timeout=15), "never connected"
+    return session
+
+
+def pump(session, needle: str, timeout: float = 10.0) -> str:
+    """Drain the transport into the emulator until ``needle`` appears."""
+
+    def check() -> bool:
+        session.emulator.feed(session.drain())
+        return needle in "\n".join(session.emulator.display())
+
+    ok = wait_for(check, timeout)
+    screen = "\n".join(session.emulator.display())
+    assert ok, f"never saw {needle!r} on screen:\n{screen}"
+    return screen
+
+
+# ------------------------------------------------------------------- lifecycle
+
+
+def test_session_connects_and_renders(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
 ) -> None:
-    session = backend.ensure_session("sleep 60")
-    session.new_window(window_name="user-window", attach=False, window_shell="sleep 60")
-
-    host = make_host("ours")
-    plan = build_plan(host, None)
-    plan.argv = ["sleep", "60"]
-    backend.open_tab(host, plan, themes.get("personal"))
-
-    tabs = backend.list_tabs()
-    assert [tab.host for tab in tabs] == ["ours"]
+    session = connect(manager, server, themes)
+    assert session.status == "connected"
+    assert "Welcome to the test server" in pump(session, "Welcome")
 
 
-def test_close_tab(backend: TmuxBackend, themes: ThemeRegistry) -> None:
-    backend.ensure_session("sleep 60")
-    host = make_host("closeme")
-    plan = build_plan(host, None)
-    plan.argv = ["sleep", "60"]
-
-    tab = backend.open_tab(host, plan, themes.get("personal"))
-    assert len(backend.list_tabs()) == 1
-
-    backend.close_tab(tab.window_id)
-    assert backend.list_tabs() == []
-
-
-def test_instantly_failing_command_still_yields_a_visible_tab(
-    backend: TmuxBackend, themes: ThemeRegistry
+def test_session_is_registered(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
 ) -> None:
-    """A dead command must leave the pane on screen, not vanish.
-
-    Without remain-on-exit inherited at creation time the window disappears
-    before it can be styled and libtmux raises on the missing window id, so the
-    user sees an internal error instead of the reason ssh failed.
-    """
-    backend.ensure_session("sleep 60")
-    host = make_host("broken")
-    plan = build_plan(host, None)
-    plan.argv = ["/nonexistent/ssh", "user@host"]
-
-    tab = backend.open_tab(host, plan, themes.get("prod"))
-    assert tab.host == "broken"
-    assert [t.host for t in backend.list_tabs()] == ["broken"]
+    session = connect(manager, server, themes)
+    assert manager.get(session.id) is session
+    assert len(manager) == 1
+    assert [s.host_name for s in manager.live()] == ["testbox"]
+    assert manager.for_host("TESTBOX") == [session]
 
 
-def test_failing_command_in_a_session_we_did_not_create(
-    backend: TmuxBackend, themes: ThemeRegistry
+def test_bad_password_reports_error_without_raising(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
 ) -> None:
-    """Same guarantee when adopting the user's own tmux session."""
-    backend.server.new_session(session_name="theirs", attach=False, window_command="sleep 60")
-    session = next(s for s in backend.server.sessions if s.session_name == "theirs")
+    """A failed connection must surface on the session, not crash the app."""
+    host = make_host(server)
+    bad = Credential(name="pw", kind="password", password="nope")
+    session = manager.open(host, bad, themes.get("prod"), cols=80, rows=24)
 
-    host = make_host("adopted")
-    plan = build_plan(host, None)
-    plan.argv = ["/nonexistent/ssh", "user@host"]
-
-    tab = backend.open_tab(host, plan, themes.get("prod"), session=session)
-    assert [t.host for t in backend.list_tabs(session)] == ["adopted"]
-    assert tab.index != "0"
+    assert wait_for(lambda: session.status == "error", timeout=15)
+    assert session.error and "uthentication" in session.error
+    assert not session.is_live
 
 
-def test_close_unknown_tab_raises(backend: TmuxBackend) -> None:
-    backend.ensure_session("sleep 60")
-    with pytest.raises(TmuxError):
-        backend.close_tab("@999")
-
-
-def test_list_tabs_without_session_is_empty(backend: TmuxBackend) -> None:
-    assert backend.list_tabs() == []
-
-
-def test_attach_command_targets_the_socket(backend: TmuxBackend) -> None:
-    argv = backend.attach_command()
-    assert argv[0] == "tmux"
-    assert "-L" in argv and backend.socket_name in argv
-    assert argv[-1] == "remotely-test"
-
-
-@pytest.mark.parametrize(
-    "env,expected",
-    [
-        ({"LANG": "en_US.UTF-8"}, True),
-        ({"LC_ALL": "C.utf8"}, True),
-        ({"LANG": "C"}, False),
-        ({"LC_ALL": "POSIX"}, False),
-        ({}, False),
-    ],
-)
-def test_locale_detection(monkeypatch: pytest.MonkeyPatch, env: dict, expected: bool) -> None:
-    for name in ("LC_ALL", "LC_CTYPE", "LANG"):
-        monkeypatch.delenv(name, raising=False)
-    for name, value in env.items():
-        monkeypatch.setenv(name, value)
-    assert locale_supports_unicode() is expected
-
-
-def test_utf8_locale_is_installed_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without a UTF-8 locale libtmux cannot even parse tmux's output."""
-    for name in ("LC_ALL", "LC_CTYPE", "LANG"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("LANG", "C")
-
-    assert ensure_utf8_locale() is True
-    assert locale_supports_unicode() is True
-    assert "utf" in os.environ["LC_CTYPE"].lower()
-
-
-def test_existing_utf8_locale_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("LC_ALL", "LC_CTYPE", "LANG"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("LANG", "en_GB.UTF-8")
-
-    assert ensure_utf8_locale() is True
-    assert "LC_CTYPE" not in os.environ  # nothing was overridden
-
-
-def test_session_creation_works_from_a_c_locale(
-    backend: TmuxBackend, monkeypatch: pytest.MonkeyPatch
+def test_typing_reaches_the_remote(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
 ) -> None:
-    """Regression: this used to fail with an opaque zip() error."""
-    for name in ("LC_ALL", "LC_CTYPE", "LANG"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("LANG", "C")
-
-    backend.ensure_session("sleep 60")
-    assert backend.session_exists()
+    session = connect(manager, server, themes)
+    pump(session, "$")
+    session.write(b"whoami\r")
+    assert USERNAME in pump(session, USERNAME)
 
 
-def test_no_utf8_locale_available_is_reported_not_papered_over(
-    monkeypatch: pytest.MonkeyPatch,
+def test_colour_survives_the_round_trip(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
 ) -> None:
-    """A system with no UTF-8 locale at all cannot support tmux.
+    session = connect(manager, server, themes)
+    pump(session, "$")
+    session.write(b"colour\r")
+    pump(session, "BOLDGREEN")
 
-    libtmux fails to parse tmux's format output before a tab title is ever
-    computed, so there is nothing to degrade gracefully to here - the honest
-    behaviour is to say so, which is what --doctor surfaces.
-    """
-    monkeypatch.setattr("remotely.sessions._available_locales", lambda: {"c", "posix"})
-    for name in ("LC_ALL", "LC_CTYPE", "LANG"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("LANG", "C")
-
-    assert ensure_utf8_locale() is False
-    assert locale_supports_unicode() is False
-
-
-def test_tab_title_is_ascii_when_unicode_is_unavailable(themes: ThemeRegistry) -> None:
-    """The title itself still degrades, which covers terminals tmux mishandles."""
-    assert themes.get("prod").tab_title("web-1", unicode_ok=False) == "[!] web-1"
-
-
-def test_attach_command_only_forces_utf8_when_the_locale_agrees(
-    backend: TmuxBackend, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    for name in ("LC_ALL", "LC_CTYPE", "LANG"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("LANG", "C")
-    assert "-u" not in backend.attach_command()
-
-    monkeypatch.setenv("LANG", "en_US.UTF-8")
-    assert "-u" in backend.attach_command()
-
-
-def test_hold_on_failure_preserves_the_command() -> None:
-    wrapped = hold_on_failure("ssh -p 22 user@host")
-    assert wrapped.startswith("ssh -p 22 user@host;")
-    assert "read" in wrapped
-
-
-def test_format_tab_lines() -> None:
-    tabs = [
-        SessionTab("@1", "1", "n", "web", "prod", active=True),
-        SessionTab("@2", "2", "n", "db", "", active=False),
+    # Find the styled cell rather than assuming a position.
+    reds = [
+        cell
+        for row in range(session.emulator.rows)
+        for cell in session.emulator.line(row)
+        if cell.fg == "#cc5555"
     ]
-    lines = format_tab_lines(tabs)
-    assert lines[0].startswith("*")
-    assert "prod" in lines[0]
-    assert lines[1].startswith(" ")
+    assert reds, "no red cells found"
+    greens = [
+        cell
+        for row in range(session.emulator.rows)
+        for cell in session.emulator.line(row)
+        if cell.bold and cell.fg == "#55aa55"
+    ]
+    assert greens, "no bold green cells found"
+
+
+def test_resize_propagates_to_remote_pty(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
+) -> None:
+    session = connect(manager, server, themes)
+    pump(session, "$")
+    session.resize(120, 40)
+    assert session.emulator.cols == 120
+    assert wait_for(lambda: server.server.pty_size == (120, 40))
+
+
+def test_remote_logout_closes_the_session(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
+) -> None:
+    session = connect(manager, server, themes)
+    pump(session, "$")
+    session.write(b"\x04")  # ctrl+d
+    assert wait_for(lambda: not session.is_live, timeout=10)
+    assert session.status == "closed"
+
+
+def test_close_stops_the_session(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
+) -> None:
+    session = connect(manager, server, themes)
+    pump(session, "$")
+    manager.close(session.id)
+    assert session.status == "closed"
+    assert manager.live() == []
+
+
+def test_close_unknown_session_raises(manager: SessionManager) -> None:
+    with pytest.raises(SessionError):
+        manager.close("nope")
+
+
+def test_remove_deregisters(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
+) -> None:
+    session = connect(manager, server, themes)
+    manager.close(session.id)
+    manager.remove(session.id)
+    assert manager.get(session.id) is None
+    assert len(manager) == 0
+
+
+def test_multiple_concurrent_sessions(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
+) -> None:
+    first = connect(manager, server, themes)
+    second = connect(manager, server, themes, theme="personal")
+
+    assert first.id != second.id
+    assert len(manager.live()) == 2
+    assert {s.theme.name for s in manager.list()} == {"prod", "personal"}
+
+    pump(first, "$")
+    pump(second, "$")
+    first.write(b"whoami\r")
+    assert USERNAME in pump(first, USERNAME)
+
+
+def test_close_all(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
+) -> None:
+    connect(manager, server, themes)
+    connect(manager, server, themes)
+    manager.close_all()
+    assert manager.live() == []
+
+
+# ---------------------------------------------------------------------- theming
+
+
+def test_session_title_uses_theme(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
+) -> None:
+    session = connect(manager, server, themes)
+    assert session.title == "🔴 testbox"
+
+
+def test_vault_backed_credential_reaches_the_server(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
+) -> None:
+    """The full path: encrypted at rest, decrypted, authenticated, connected."""
+    vault = Vault()
+    vault.initialise(PASSCODE)
+    vault.put(Credential(name="pw", kind="password", password=PASSWORD))
+    vault.lock()
+
+    reopened = Vault()
+    reopened.unlock(PASSCODE)
+    stored = reopened.require("pw")
+
+    host = make_host(server)
+    session = manager.open(host, stored, themes.get("prod"), cols=80, rows=24)
+    assert wait_for(lambda: session.status != "connecting", timeout=15)
+    assert session.status == "connected", session.error
+    assert "Welcome" in pump(session, "Welcome")

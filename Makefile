@@ -1,6 +1,6 @@
 # Remotely - development commands
 
-.PHONY: help setup run doctor test test-fast lint build install uninstall clean
+.PHONY: help setup run doctor test binary lint build install uninstall clean
 
 help:
 	@echo "Remotely - development commands"
@@ -9,7 +9,7 @@ help:
 	@echo "  make run         run the app from source"
 	@echo "  make doctor      check the environment"
 	@echo "  make test        run the test suite"
-	@echo "  make test-fast   run tests, skipping the tmux integration tests"
+	@echo "  make binary      build the self-contained binary"
 	@echo "  make build       build the wheel and sdist"
 	@echo "  make install     install as a uv tool from this checkout"
 	@echo "  make uninstall   remove the uv tool"
@@ -28,8 +28,10 @@ doctor:
 test:
 	uv run pytest -q
 
-test-fast:
-	uv run pytest -q --ignore=tests/test_sessions.py
+binary:
+	uv run pyinstaller --noconfirm --clean remotely.spec
+	@echo "Built: ./dist/remotely"
+	@ls -lh dist/remotely
 
 lint:
 	uv run python -m compileall -q src/remotely

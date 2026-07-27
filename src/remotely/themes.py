@@ -43,7 +43,7 @@ class Theme:
     source: Path | None = None
     builtin: bool = False
     colors: dict[str, str] = field(default_factory=dict)
-    tmux: dict[str, str] = field(default_factory=dict)
+    terminal: dict[str, str] = field(default_factory=dict)
     tab: dict[str, str] = field(default_factory=dict)
     remote: dict[str, Any] = field(default_factory=dict)
 
@@ -54,6 +54,31 @@ class Theme:
     @property
     def accent(self) -> str:
         return self.colors.get("accent", "#7aa2f7")
+
+    @property
+    def background(self) -> str:
+        return self.colors.get("background", "#0d1117")
+
+    @property
+    def foreground(self) -> str:
+        return self.colors.get("foreground", "#c5cede")
+
+    @property
+    def dim(self) -> str:
+        return self.colors.get("dim", "#6b7280")
+
+    def pane_styles(self) -> dict[str, str]:
+        """Textual style values for a session pane under this theme.
+
+        ``[terminal]`` overrides ``[colors]`` so a theme can tune the session
+        surface without restating the palette.
+        """
+        overrides = self.terminal
+        return {
+            "background": overrides.get("background", self.background),
+            "color": overrides.get("foreground", self.foreground),
+            "border_color": overrides.get("border", self.accent),
+        }
 
     @property
     def icon(self) -> str:
@@ -78,27 +103,6 @@ class Theme:
             return template.format(icon=icon, host=host_name, theme=self.name)
         except (KeyError, IndexError):
             return f"{icon} {host_name}"
-
-    def tmux_window_options(self) -> dict[str, str]:
-        """Theme keys translated to real tmux window options.
-
-        Unknown keys are passed through untouched so a theme file can reach any
-        tmux window option without this module needing to know about it.
-        """
-        mapping = {
-            "window_style": "window-style",
-            "window_active_style": "window-active-style",
-            "pane_border_style": "pane-border-style",
-            "pane_active_border_style": "pane-active-border-style",
-            "window_status_style": "window-status-style",
-            "window_status_current_style": "window-status-current-style",
-        }
-        options: dict[str, str] = {}
-        for key, value in self.tmux.items():
-            if not isinstance(value, str):
-                continue
-            options[mapping.get(key, key.replace("_", "-"))] = value
-        return options
 
     def remote_prompt_command(self) -> str | None:
         """A shell snippet to colour the remote prompt, or ``None``.
@@ -131,7 +135,7 @@ class Theme:
             source=source,
             builtin=builtin,
             colors={k: str(v) for k, v in section("colors").items()},
-            tmux={k: str(v) for k, v in section("tmux").items()},
+            terminal={k: str(v) for k, v in section("terminal").items()},
             tab={k: str(v) for k, v in section("tab").items()},
             remote=section("remote"),
         )

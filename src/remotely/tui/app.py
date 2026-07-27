@@ -1,8 +1,8 @@
 """The Remotely TUI.
 
-A single command bar drives everything. The list underneath is both the search
-result and the completion dropdown, so there is only ever one thing to look at
-and one thing to press enter on.
+A single command bar drives everything, and SSH sessions open as tabs inside
+this app rather than in an external multiplexer. Tab 0 is always the launcher,
+so there is a way back from any session.
 """
 
 from __future__ import annotations
@@ -15,17 +15,17 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import Footer, Input, OptionList, Static
+from textual.widgets import ContentSwitcher, Footer, Input, OptionList, Static, Tabs, Tab
 from textual.widgets.option_list import Option
 
 from .. import __version__, config
-from ..completion import COMMANDS, Completion, CompletionEngine, find_command, parse
+from ..completion import Completion, CompletionEngine, find_command, parse
 from ..importexport import TransferError, export_hosts, import_hosts
 from ..models import Credential, Host
-from ..sessions import SessionTab, TmuxBackend, TmuxError, current_session_name, inside_tmux
-from ..ssh import SSHError, askpass_force_supported, build_plan
+from ..sessions import Session, SessionManager
 from ..store import HostStore, StoreError
 from ..themes import ThemeRegistry
+from ..transport import TransportError, system_ssh_available
 from ..vault import InvalidPasscode, Vault, VaultError, VaultLocked
 from .screens import (
     ConfirmScreen,
@@ -39,6 +39,9 @@ from .screens import (
     session_options,
     theme_options,
 )
+from .terminal import TerminalPane
+
+LAUNCHER_TAB = "launcher"
 
 
 class CommandBar(Input):
@@ -89,6 +92,9 @@ class RemotelyApp(App[None]):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit", priority=True),
         Binding("f1", "help", "Help", priority=True),
+        Binding("ctrl+w", "show_launcher", "Launcher", priority=True),
+        Binding("ctrl+pagedown", "next_tab", "Next tab", priority=True, show=False),
+        Binding("ctrl+pageup", "prev_tab", "Prev tab", priority=True, show=False),
         Binding("ctrl+n", "new_host", "New", priority=True),
         Binding("ctrl+e", "edit_host", "Edit", priority=True),
         Binding("ctrl+d", "delete_host", "Delete", priority=True),
@@ -104,17 +110,14 @@ class RemotelyApp(App[None]):
         store: HostStore | None = None,
         vault: Vault | None = None,
         themes: ThemeRegistry | None = None,
-        backend: TmuxBackend | None = None,
+        sessions: SessionManager | None = None,
     ) -> None:
         super().__init__()
         config.ensure_layout()
         self.store = store or HostStore()
         self.vault = vault or Vault()
         self.themes = themes or ThemeRegistry()
-        # When already inside a tmux session, put tabs there rather than
-        # hijacking the user into a second session.
-        existing = current_session_name()
-        self.backend = backend or TmuxBackend(session_name=existing or "remotely")
+        self.sessions = sessions or SessionManager()
         self.engine = CompletionEngine(
             hosts=lambda: self.store.hosts,
             tags=lambda: self.store.tags(),
@@ -129,14 +132,19 @@ class RemotelyApp(App[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             yield Static("", id="banner")
-            yield CommandBar(
-                placeholder="Search hosts, or / for commands, @ for tags, # for groups",
-                id="command-bar",
-            )
-            with Horizontal(id="body"):
-                yield OptionList(id="results")
-                with VerticalScroll(id="detail-pane"):
-                    yield Static("", id="detail")
+            yield Tabs(Tab("Launcher", id=LAUNCHER_TAB), id="tabs")
+            with ContentSwitcher(initial=LAUNCHER_TAB, id="content"):
+                with Vertical(id=LAUNCHER_TAB):
+                    yield CommandBar(
+                        placeholder=(
+                            "Search hosts, or / for commands, @ for tags, # for groups"
+                        ),
+                        id="command-bar",
+                    )
+                    with Horizontal(id="body"):
+                        yield OptionList(id="results")
+                        with VerticalScroll(id="detail-pane"):
+                            yield Static("", id="detail")
             yield Static("", id="status")
         yield Footer()
 
@@ -153,11 +161,12 @@ class RemotelyApp(App[None]):
         if not self.vault.exists():
             lock = "[dim]not created[/dim]"
         count = len(self.store)
+        live = len(self.sessions.live())
         self.query_one("#banner", Static).update(
             f"[b]Remotely[/b] [dim]v{__version__}[/dim]   "
             f"{count} host{'s' if count != 1 else ''}   "
             f"vault {lock}   "
-            f"session [b]{self.backend.session_name}[/b]"
+            f"{live} session{'s' if live != 1 else ''}"
         )
 
     def _status(self, message: str, *, error: bool = False) -> None:
@@ -166,17 +175,16 @@ class RemotelyApp(App[None]):
         widget.update(message)
 
     def _warn_about_environment(self) -> None:
-        problems: list[str] = []
-        if not self.backend.is_available():
-            problems.append("tmux was not found - tabs are unavailable.")
-        elif not inside_tmux():
-            problems.append("Not running inside tmux; launch with 'remotely' for tabs.")
-        if not askpass_force_supported():
+        """Only genuine problems. The binary carries its own SSH client, so
+        there is nothing to check for the default path."""
+        problems: list[str] = list(self.themes.errors)
+        needs_system_ssh = [h.name for h in self.store if h.use_system_ssh]
+        if needs_system_ssh and not system_ssh_available():
+            names = ", ".join(needs_system_ssh[:3])
             problems.append(
-                "OpenSSH < 8.4: stored passwords cannot be auto-supplied, ssh will prompt."
+                f"{len(needs_system_ssh)} host(s) are set to use system ssh "
+                f"({names}) but ssh is not installed."
             )
-        for error in self.themes.errors:
-            problems.append(error)
         if problems:
             self._status("  ".join(problems), error=True)
 
@@ -205,7 +213,6 @@ class RemotelyApp(App[None]):
             self._update_detail(None)
 
     def _grouped_host_options(self) -> list[Option]:
-        """The idle view: every host, bucketed by group."""
         options: list[Option] = []
         groups = self.store.groups()
         if not groups:
@@ -221,7 +228,9 @@ class RemotelyApp(App[None]):
                 completion = CompletionEngine._host_completion(host)
                 option_id = f"host:{group}:{index}:{host.name}"
                 self._rows[option_id] = completion
-                options.append(Option(self._render_completion(completion, indent=True), id=option_id))
+                options.append(
+                    Option(self._render_completion(completion, indent=True), id=option_id)
+                )
         return options
 
     def _render_completion(self, completion: Completion, *, indent: bool = False) -> str:
@@ -230,7 +239,12 @@ class RemotelyApp(App[None]):
             host = self.store.get(completion.value)
             theme = self.themes.get(host.theme if host else None)
             marker = f"[{theme.accent}]{theme.icon}[/]"
-            return f"{pad}{marker} [b]{completion.label}[/b]  [dim]{completion.description}[/dim]"
+            live = len(self.sessions.for_host(completion.value)) if host else 0
+            badge = f" [dim]({live} open)[/dim]" if live else ""
+            return (
+                f"{pad}{marker} [b]{completion.label}[/b]{badge}  "
+                f"[dim]{completion.description}[/dim]"
+            )
         icons = {"command": "›", "tag": "@", "group": "#", "theme": "◈", "path": "…"}
         icon = icons.get(completion.kind, "•")
         return f"{pad}[dim]{icon}[/dim] [b]{completion.label}[/b]  [dim]{completion.description}[/dim]"
@@ -238,8 +252,7 @@ class RemotelyApp(App[None]):
     def _highlight_first_selectable(self) -> None:
         results = self.query_one("#results", OptionList)
         for index in range(results.option_count):
-            option = results.get_option_at_index(index)
-            if not option.disabled:
+            if not results.get_option_at_index(index).disabled:
                 results.highlighted = index
                 return
         results.highlighted = None
@@ -288,6 +301,7 @@ class RemotelyApp(App[None]):
         else:
             auth = "ssh agent / default keys"
 
+        client = "system ssh" if host.use_system_ssh else "built-in"
         options = host.ssh_options
         if options is None:
             options_text = "[dim]defaults[/dim]"
@@ -296,6 +310,7 @@ class RemotelyApp(App[None]):
         else:
             options_text = "\n".join(f"  -o {o}" for o in options)
 
+        open_count = len(self.sessions.for_host(host.name))
         lines = [
             f"[b]{host.name}[/b]",
             "",
@@ -305,10 +320,19 @@ class RemotelyApp(App[None]):
             f"[dim]tags[/dim]     {' '.join('@' + t for t in host.tags) or '[dim]none[/dim]'}",
             f"[dim]theme[/dim]    [{theme.accent}]{theme.icon} {theme.name}[/]",
             f"[dim]auth[/dim]     {auth}",
-            "",
-            "[dim]ssh options[/dim]",
-            options_text,
+            f"[dim]client[/dim]   {client}",
         ]
+        if open_count:
+            lines.append(f"[dim]open[/dim]     {open_count} session(s)")
+        lines += ["", "[dim]ssh options[/dim]", options_text]
+
+        credential_kind = None
+        if host.auth_mode == "credential" and host.credential and not self.vault.is_locked:
+            cred = self.vault.get(host.credential)
+            credential_kind = cred.kind if cred else None
+        for warning in host.warnings(credential_kind=credential_kind):
+            lines += ["", f"[yellow]{warning}[/yellow]"]
+
         if host.description:
             lines += ["", f"[dim]{host.description}[/dim]"]
         detail.update("\n".join(lines))
@@ -376,8 +400,6 @@ class RemotelyApp(App[None]):
         text = self.query_one("#command-bar", CommandBar).value
         parsed = parse(text)
 
-        # An explicit "/command arg" runs as typed rather than acting on whatever
-        # happens to be highlighted.
         if parsed.mode == "command_arg" and parsed.command is not None and parsed.query:
             self._run_command(parsed.command.name, parsed.query)
             return
@@ -409,9 +431,6 @@ class RemotelyApp(App[None]):
             bar = self.query_one("#command-bar", CommandBar)
             bar.value = completion.insert_text
             bar.cursor_position = len(bar.value)
-            return
-        if completion.kind == "theme":
-            self._status(f"Theme {completion.value}")
 
     # -------------------------------------------------------------- dispatching
 
@@ -439,14 +458,12 @@ class RemotelyApp(App[None]):
         action()
 
     def _clear_bar(self) -> None:
-        bar = self.query_one("#command-bar", CommandBar)
-        bar.value = ""
+        self.query_one("#command-bar", CommandBar).value = ""
 
     # ------------------------------------------------------------------- vault
 
     @work
     async def _unlock_vault(self, reason: str = "") -> bool:
-        """Prompt for the passcode, creating the vault on first use."""
         if not self.vault.is_locked:
             return True
         creating = not self.vault.exists()
@@ -481,6 +498,64 @@ class RemotelyApp(App[None]):
         self._refresh_banner()
         self._status("Vault locked.")
 
+    # ------------------------------------------------------------------ tabs
+
+    def _tabs(self) -> Tabs:
+        return self.query_one("#tabs", Tabs)
+
+    def _switch_to(self, tab_id: str) -> None:
+        self.query_one("#content", ContentSwitcher).current = tab_id
+        tabs = self._tabs()
+        if tabs.active != tab_id:
+            tabs.active = tab_id
+
+    def action_show_launcher(self) -> None:
+        self._switch_to(LAUNCHER_TAB)
+        self.query_one("#command-bar", CommandBar).focus()
+
+    def action_next_tab(self) -> None:
+        self._tabs().action_next_tab()
+
+    def action_prev_tab(self) -> None:
+        self._tabs().action_previous_tab()
+
+    @on(Tabs.TabActivated, "#tabs")
+    def _on_tab_activated(self, event: Tabs.TabActivated) -> None:
+        tab_id = event.tab.id
+        if not tab_id:
+            return
+        self.query_one("#content", ContentSwitcher).current = tab_id
+        if tab_id == LAUNCHER_TAB:
+            self.query_one("#command-bar", CommandBar).focus()
+        else:
+            try:
+                self.query_one(f"#{tab_id}", TerminalPane).focus()
+            except Exception:
+                pass
+
+    @on(TerminalPane.Closed)
+    def _on_pane_closed(self, event: TerminalPane.Closed) -> None:
+        session = event.session
+        status = session.exit_status
+        detail = f" (exit {status})" if status not in (None, 0) else ""
+        if session.error:
+            self._status(f"[b]{session.host_name}[/b]: {session.error}", error=True)
+        else:
+            self._status(f"Session [b]{session.host_name}[/b] ended{detail}.")
+        self._refresh_banner()
+        self._refresh_results()
+
+    @on(TerminalPane.TitleChanged)
+    def _on_pane_title(self, event: TerminalPane.TitleChanged) -> None:
+        # Remote-set titles are useful but must not lose the theme marker that
+        # tells production apart at a glance.
+        theme = event.session.theme
+        label = f"{theme.icon} {event.title[:28]}"
+        try:
+            self._tabs().query_one(f"#{event.session.id}", Tab).label = label
+        except Exception:
+            pass
+
     # --------------------------------------------------------------- connecting
 
     @work
@@ -501,27 +576,68 @@ class RemotelyApp(App[None]):
                 self._status(str(exc), error=True)
                 return
 
-        try:
-            plan = build_plan(host, credential)
-        except SSHError as exc:
-            self._status(str(exc), error=True)
-            return
-
         theme = self.themes.get(host.theme)
+        body = self.query_one("#body")
+        cols = max(body.size.width - 2, 20)
+        rows = max(body.size.height - 2, 10)
+
         try:
-            session = None
-            if not self.backend.session_exists():
-                # Running the TUI outside the managed session (dev mode); make a
-                # home for the tab rather than failing.
-                session = self.backend.ensure_session("sleep 86400")
-            tab = self.backend.open_tab(host, plan, theme, session=session)
-        except TmuxError as exc:
+            session = self.sessions.open(host, credential, theme, cols=cols, rows=rows)
+        except TransportError as exc:
             self._status(str(exc), error=True)
             return
 
-        notes = f"  [dim]{' '.join(plan.notes)}[/dim]" if plan.notes else ""
-        self._status(f"Launched [b]{host.name}[/b] in tab {tab.index} ({theme.name}).{notes}")
+        pane = TerminalPane(session, id=session.id)
+        styles = theme.pane_styles()
+        self.query_one("#content", ContentSwitcher).mount(pane)
+        pane.styles.background = styles["background"]
+        pane.styles.color = styles["color"]
+
+        self._tabs().add_tab(Tab(session.title, id=session.id))
+        self._switch_to(session.id)
+
+        self._status(f"Connecting to [b]{host.name}[/b]…")
         self._clear_bar()
+        self._refresh_banner()
+        self._watch_connection(session)
+
+    @work
+    async def _watch_connection(self, session: Session) -> None:
+        """Report the outcome of the handshake without blocking the UI."""
+        import asyncio
+
+        for _ in range(600):  # up to ~60s, generous for slow bastions
+            if session.status != "connecting":
+                break
+            await asyncio.sleep(0.1)
+
+        if session.status == "error":
+            self._status(f"[b]{session.host_name}[/b]: {session.error}", error=True)
+            self.action_show_launcher()
+        elif session.status == "connected":
+            notes = f"  [dim]{' '.join(session.notes)}[/dim]" if session.notes else ""
+            self._status(
+                f"Connected to [b]{session.host_name}[/b] ({session.theme.name}).{notes}"
+            )
+        self._refresh_banner()
+        self._refresh_results()
+
+    def _close_session(self, session_id: str) -> None:
+        session = self.sessions.get(session_id)
+        if session is None:
+            return
+        session.close()
+        self.sessions.remove(session_id)
+        try:
+            self._tabs().remove_tab(session_id)
+        except Exception:
+            pass
+        try:
+            self.query_one(f"#{session_id}", TerminalPane).remove()
+        except Exception:
+            pass
+        self.action_show_launcher()
+        self._refresh_banner()
         self._refresh_results()
 
     # ------------------------------------------------------------------ actions
@@ -723,28 +839,27 @@ class RemotelyApp(App[None]):
 
     @work
     async def action_sessions(self) -> None:
-        try:
-            tabs: list[SessionTab] = self.backend.list_tabs()
-        except TmuxError as exc:
-            self._status(str(exc), error=True)
-            return
-        if not tabs:
-            self._status("No open session tabs.")
+        sessions = self.sessions.list()
+        if not sessions:
+            self._status("No open sessions.")
             return
         choice = await self.push_screen_wait(
             ListPickerScreen(
-                "Open tabs",
-                session_options(tabs),
-                help_text="Select a tab to switch to it.",
-                empty_text="No open session tabs.",
+                "Open sessions",
+                session_options(sessions),
+                help_text="Select a session to switch to it, or close the highlighted one.",
+                empty_text="No open sessions.",
+                extra_buttons=[("closeall", "Close all")],
             )
         )
-        if choice is None or choice.startswith("!"):
+        if choice is None:
             return
-        try:
-            self.backend.focus_tab(choice)
-        except TmuxError as exc:
-            self._status(str(exc), error=True)
+        if choice == "!closeall":
+            for session in list(sessions):
+                self._close_session(session.id)
+            self._status("Closed all sessions.")
+            return
+        self._switch_to(choice)
 
     # ---------------------------------------------------------- import / export
 
@@ -770,10 +885,7 @@ class RemotelyApp(App[None]):
 
         try:
             path, wrote_secrets = export_hosts(
-                self.store,
-                Path(raw_path),
-                vault=self.vault,
-                include_secrets=include_secrets,
+                self.store, Path(raw_path), vault=self.vault, include_secrets=include_secrets
             )
         except (TransferError, VaultLocked, OSError) as exc:
             self._status(str(exc), error=True)
@@ -832,6 +944,12 @@ class RemotelyApp(App[None]):
         self._refresh_banner()
         self._refresh_results()
         self._status(f"Import complete: {result.summary()}.")
+
+    # ------------------------------------------------------------------ closing
+
+    def action_quit(self) -> None:
+        self.sessions.close_all()
+        self.exit()
 
 
 def run(**kwargs: Any) -> None:

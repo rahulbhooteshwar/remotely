@@ -3,19 +3,19 @@
 #
 #   curl -LsSf https://raw.githubusercontent.com/rahulbhooteshwar/remotely/main/install.sh | sh
 #
-# Installs Remotely as a uv tool. POSIX sh on purpose so it runs under
-# sh, bash, dash and zsh without modification.
+# Downloads a prebuilt, self-contained binary. Nothing else is installed and
+# nothing else is required: no Python, no uv, no tmux, no OpenSSH.
 #
 # Environment overrides:
-#   REMOTELY_REPO     owner/name to install from      (default rahulbhooteshwar/remotely)
-#   REMOTELY_REF      branch or tag to install        (default main)
-#   REMOTELY_SPEC     full uv install spec, wins over the above
+#   REMOTELY_REPO      owner/name to download from  (default rahulbhooteshwar/remotely)
+#   REMOTELY_VERSION   tag to install, e.g. v1.0.0  (default: latest release)
+#   REMOTELY_BIN_DIR   install location             (default ~/.local/bin)
 
 set -eu
 
 REPO="${REMOTELY_REPO:-rahulbhooteshwar/remotely}"
-REF="${REMOTELY_REF:-main}"
-SPEC="${REMOTELY_SPEC:-git+https://github.com/${REPO}@${REF}}"
+BIN_DIR="${REMOTELY_BIN_DIR:-$HOME/.local/bin}"
+VERSION="${REMOTELY_VERSION:-}"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     RED=$(printf '\033[0;31m'); GREEN=$(printf '\033[0;32m')
@@ -25,12 +25,11 @@ else
     RED=''; GREEN=''; YELLOW=''; BLUE=''; BOLD=''; NC=''
 fi
 
-info()    { printf '%s->%s %s\n' "$BLUE" "$NC" "$1"; }
-ok()      { printf '%s ok%s %s\n' "$GREEN" "$NC" "$1"; }
-warn()    { printf '%s  !%s %s\n' "$YELLOW" "$NC" "$1"; }
-err()     { printf '%s  x%s %s\n' "$RED" "$NC" "$1" >&2; }
-have()    { command -v "$1" >/dev/null 2>&1; }
-
+info() { printf '%s->%s %s\n' "$BLUE" "$NC" "$1"; }
+ok()   { printf '%s ok%s %s\n' "$GREEN" "$NC" "$1"; }
+warn() { printf '%s  !%s %s\n' "$YELLOW" "$NC" "$1"; }
+err()  { printf '%s  x%s %s\n' "$RED" "$NC" "$1" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
 fail() { err "$1"; exit 1; }
 
 printf '\n%sRemotely%s - terminal based SSH hosts and connection manager\n\n' "$BOLD" "$NC"
@@ -38,96 +37,113 @@ printf '\n%sRemotely%s - terminal based SSH hosts and connection manager\n\n' "$
 # ---------------------------------------------------------------- platform
 
 OS=$(uname -s)
+ARCH=$(uname -m)
+
 case "$OS" in
-    Darwin) PLATFORM="macOS" ;;
-    Linux)  PLATFORM="Linux" ;;
-    *)      PLATFORM="$OS"; warn "Untested platform: $OS" ;;
+    Darwin)
+        case "$ARCH" in
+            arm64|aarch64) TARGET="macos-arm64" ;;
+            x86_64)        TARGET="macos-x86_64" ;;
+            *) fail "Unsupported macOS architecture: $ARCH" ;;
+        esac
+        ;;
+    Linux)
+        case "$ARCH" in
+            x86_64|amd64) TARGET="linux-x86_64" ;;
+            aarch64|arm64)
+                fail "No prebuilt Linux arm64 binary yet. Install from source:
+     uv tool install git+https://github.com/$REPO"
+                ;;
+            *) fail "Unsupported Linux architecture: $ARCH" ;;
+        esac
+        ;;
+    *)
+        fail "Unsupported platform: $OS. Install from source:
+     uv tool install git+https://github.com/$REPO"
+        ;;
 esac
-ok "Platform: $PLATFORM $(uname -m)"
+ok "Platform: $OS $ARCH -> $TARGET"
 
-# ------------------------------------------------------------ dependencies
+have curl || have wget || fail "curl or wget is required."
 
-install_hint() {
-    # $1 = package name
-    if [ "$OS" = "Darwin" ]; then
-        printf '     brew install %s\n' "$1"
-    elif have apt-get; then
-        printf '     sudo apt-get install -y %s\n' "$1"
-    elif have dnf; then
-        printf '     sudo dnf install -y %s\n' "$1"
-    elif have pacman; then
-        printf '     sudo pacman -S %s\n' "$1"
+download() {
+    # $1 = url, $2 = destination
+    if have curl; then
+        curl -fsSL "$1" -o "$2"
     else
-        printf '     install %s with your package manager\n' "$1"
+        wget -qO "$2" "$1"
     fi
 }
 
-MISSING=0
+fetch() {
+    if have curl; then
+        curl -fsSL "$1"
+    else
+        wget -qO- "$1"
+    fi
+}
 
-if have tmux; then
-    ok "tmux: $(tmux -V 2>/dev/null || echo present)"
-else
-    err "tmux not found - Remotely uses it for session tabs."
-    install_hint tmux
-    MISSING=1
+# ----------------------------------------------------------------- version
+
+if [ -z "$VERSION" ]; then
+    info "Looking up the latest release..."
+    VERSION=$(fetch "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    [ -n "$VERSION" ] || fail "Could not determine the latest release. Set REMOTELY_VERSION=vX.Y.Z."
 fi
+ok "Version: $VERSION"
 
-if have ssh; then
-    SSH_VERSION=$(ssh -V 2>&1 | cut -d, -f1)
-    ok "ssh: $SSH_VERSION"
-    # SSH_ASKPASS_REQUIRE, needed to hand stored passwords to ssh, is 8.4+.
-    SSH_MAJOR=$(printf '%s' "$SSH_VERSION" | sed -n 's/^OpenSSH_\([0-9]*\).*/\1/p')
-    SSH_MINOR=$(printf '%s' "$SSH_VERSION" | sed -n 's/^OpenSSH_[0-9]*\.\([0-9]*\).*/\1/p')
-    if [ -n "$SSH_MAJOR" ] && [ -n "$SSH_MINOR" ]; then
-        if [ "$SSH_MAJOR" -lt 8 ] || { [ "$SSH_MAJOR" -eq 8 ] && [ "$SSH_MINOR" -lt 4 ]; }; then
-            warn "OpenSSH < 8.4: stored passwords cannot be auto-supplied; ssh will prompt."
-        fi
+ARCHIVE="remotely-${TARGET}.tar.gz"
+URL="https://github.com/$REPO/releases/download/$VERSION/$ARCHIVE"
+
+# ---------------------------------------------------------------- download
+
+TMP=$(mktemp -d 2>/dev/null || mktemp -d -t remotely)
+cleanup() { rm -rf "$TMP"; }
+trap cleanup EXIT INT TERM
+
+info "Downloading $ARCHIVE..."
+download "$URL" "$TMP/$ARCHIVE" || fail "Download failed: $URL"
+
+# Verify the checksum when the release publishes one.
+if download "$URL.sha256" "$TMP/$ARCHIVE.sha256" 2>/dev/null; then
+    EXPECTED=$(awk '{print $1}' "$TMP/$ARCHIVE.sha256")
+    if have shasum; then
+        ACTUAL=$(shasum -a 256 "$TMP/$ARCHIVE" | awk '{print $1}')
+    elif have sha256sum; then
+        ACTUAL=$(sha256sum "$TMP/$ARCHIVE" | awk '{print $1}')
+    else
+        ACTUAL=""
+    fi
+    if [ -n "$ACTUAL" ]; then
+        [ "$EXPECTED" = "$ACTUAL" ] || fail "Checksum mismatch. Expected $EXPECTED, got $ACTUAL."
+        ok "Checksum verified"
+    else
+        warn "No sha256 tool available, skipping verification"
     fi
 else
-    err "ssh not found."
-    install_hint openssh-client
-    MISSING=1
+    warn "No published checksum for this release, skipping verification"
 fi
 
-[ "$MISSING" -eq 0 ] || fail "Install the missing dependencies above, then re-run this script."
-
-# --------------------------------------------------------------------- uv
-
-if have uv; then
-    ok "uv: $(uv --version)"
-else
-    info "uv not found, installing it..."
-    if ! have curl; then fail "curl is required to install uv."; fi
-    curl -LsSf https://astral.sh/uv/install.sh | sh || fail "Could not install uv."
-    # uv lands in one of these depending on version.
-    for d in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
-        [ -d "$d" ] && PATH="$d:$PATH"
-    done
-    export PATH
-    have uv || fail "uv installed but not on PATH. Open a new shell and re-run."
-    ok "uv installed"
-fi
+tar -xzf "$TMP/$ARCHIVE" -C "$TMP" || fail "Could not extract $ARCHIVE"
+[ -f "$TMP/remotely" ] || fail "Archive did not contain a 'remotely' binary"
 
 # ----------------------------------------------------------------- install
 
-# Running from a checkout? Install that instead of fetching from GitHub.
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || echo "")
-if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/pyproject.toml" ]; then
-    SPEC="$SCRIPT_DIR"
-    info "Installing from local checkout: $SPEC"
-else
-    info "Installing from $SPEC"
-fi
+mkdir -p "$BIN_DIR"
+# Replace atomically so a running copy is never truncated underneath itself.
+mv "$TMP/remotely" "$BIN_DIR/remotely.new"
+chmod 755 "$BIN_DIR/remotely.new"
+mv "$BIN_DIR/remotely.new" "$BIN_DIR/remotely"
+ok "Installed to $BIN_DIR/remotely"
 
-if uv tool install --force "$SPEC"; then
-    ok "Remotely installed"
-else
-    fail "Installation failed."
+# macOS quarantines anything downloaded; clear it so the binary just runs.
+if [ "$OS" = "Darwin" ] && have xattr; then
+    xattr -d com.apple.quarantine "$BIN_DIR/remotely" 2>/dev/null || true
 fi
 
 # -------------------------------------------------------------------- PATH
 
-BIN_DIR="$HOME/.local/bin"
 if ! printf '%s' ":$PATH:" | grep -q ":$BIN_DIR:"; then
     warn "$BIN_DIR is not on your PATH."
     case "${SHELL:-}" in
@@ -149,17 +165,16 @@ else
     ok "$BIN_DIR is on your PATH"
 fi
 
-# ------------------------------------------------------------------- verify
+# ------------------------------------------------------------------ verify
 
-if have remotely; then
-    ok "$(remotely --version)"
-    printf '\n%sRun it:%s  remotely\n' "$BOLD" "$NC"
-    printf '%sCheck it:%s remotely --doctor\n\n' "$BOLD" "$NC"
+printf '\n'
+if "$BIN_DIR/remotely" --version >/dev/null 2>&1; then
+    ok "$("$BIN_DIR/remotely" --version)"
+    printf '\n%sRun it:%s   remotely\n' "$BOLD" "$NC"
+    printf '%sCheck it:%s remotely --doctor\n' "$BOLD" "$NC"
 else
-    printf '\n'
-    warn "Installed, but 'remotely' is not on PATH yet."
-    printf '     Try: %s/remotely\n\n' "$BIN_DIR"
+    fail "The binary was installed but will not run. Please open an issue."
 fi
 
-printf 'Config will live in ~/.remotely\n'
-printf 'Uninstall with: uv tool uninstall remotely\n\n'
+printf '\nConfig lives in ~/.remotely\n'
+printf 'Uninstall with: rm %s/remotely\n\n' "$BIN_DIR"

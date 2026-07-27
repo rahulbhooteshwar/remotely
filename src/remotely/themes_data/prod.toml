@@ -8,13 +8,10 @@ background = "#2a0d0d"
 foreground = "#ffd7d7"
 dim = "#a06a6a"
 
-[tmux]
-window_style = "bg=#2a0d0d,fg=#ffd7d7"
-window_active_style = "bg=#330f0f,fg=#ffe5e5"
-pane_border_style = "fg=#7a2b2b"
-pane_active_border_style = "fg=#ff5f5f,bold"
-window_status_style = "fg=#ff9f9f,bg=#3a1010"
-window_status_current_style = "fg=#2a0d0d,bg=#ff5f5f,bold"
+[terminal]
+background = "#1a0808"
+foreground = "#ffdcdc"
+border = "#ff5f5f"
 
 [tab]
 icon = "🔴"

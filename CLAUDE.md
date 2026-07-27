@@ -4,139 +4,147 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Remotely is a terminal SSH connection manager: a Textual TUI that launches SSH
-sessions as tmux windows. It is a from-scratch successor to
-[Connectify](https://github.com/rahulbhooteshwar/connectify-iterm2) and shares
-no code with it. Unlike Connectify it is **not** macOS-specific and has no web
-server — everything happens in one terminal.
+Remotely is a terminal SSH connection manager that ships as **one binary with
+zero runtime dependencies** — no Python, no uv, no tmux, no OpenSSH, no sshpass.
+It carries its own SSH client (paramiko) and its own terminal emulator (pyte),
+and PyInstaller bundles the interpreter.
 
-A uv project: `pyproject.toml`, `uv.lock`, sources under `src/remotely/`.
+It succeeds [Connectify](https://github.com/rahulbhooteshwar/connectify-iterm2)
+and shares no code with it.
+
+**The zero-dependency property is the product.** Before adding anything that
+shells out to an external binary, or a dependency that needs a compiler or a
+system library at runtime, check it survives `make binary` and the hermetic
+sandbox check in CI.
 
 ## Commands
 
 ```bash
 make setup                 # uv sync
-make run                   # uv run remotely
-make doctor                # environment diagnostics - run this first when debugging
+make run                   # run from source
 make test                  # uv run pytest -q
-make test-fast             # skip the tmux integration tests
-make build                 # uv build (wheel + sdist)
-make install               # uv tool install --force .
+make binary                # PyInstaller -> ./dist/remotely
+make doctor
 
-uv run pytest tests/test_vault.py::test_wrong_passcode_rejected   # single test
-REMOTELY_HOME=/tmp/rh uv run remotely                             # throwaway config
+uv run pytest tests/test_transport.py::test_password_auth_connects   # single test
+REMOTELY_HOME=/tmp/rh uv run remotely                                # throwaway config
 ```
 
-`uv tool install --force .` alone can serve a **stale cached wheel**; use
-`uv cache clean remotely && uv tool install --reinstall --force .` after
-changing source if the installed binary seems not to update.
+`uv tool install --force .` can serve a **stale cached wheel**; use
+`uv cache clean remotely && uv tool install --reinstall --force .`.
 
 ## Architecture
 
-Layered, with the TUI at the top and no upward dependencies:
+Layered, TUI at the top, no upward dependencies:
 
 - **`models.py`** — `Host` and `Credential`. A `Host` never holds a secret; it
-  references a vault credential by name. This is what keeps `hosts.json` safe to
+  references a vault credential by name. That is what keeps `hosts.json` safe to
   export and commit.
-- **`store.py`** — `hosts.json` CRUD, atomic writes, grouping. Hosts are keyed
-  by `name`, case-insensitively.
-- **`vault.py`** — one encrypted file, one passcode. scrypt → AES-256-GCM. The
-  envelope header is authenticated as AAD, so weakening the KDF params on disk
+- **`store.py`** — `hosts.json` CRUD, atomic writes, grouping. Keyed by `name`,
+  case-insensitively.
+- **`vault.py`** — one encrypted file, one passcode. scrypt → AES-256-GCM, with
+  the envelope header authenticated as AAD so weakening the KDF params on disk
   fails the tag check rather than downgrading security.
 - **`themes.py`** — TOML themes from the bundled package plus
   `~/.remotely/themes/`, user files shadowing bundled ones by name.
-- **`ssh.py`** — builds argv and stages secrets. Never puts a password on the
-  command line.
-- **`sessions.py`** — libtmux wrapper. Tabs are tmux windows.
-- **`completion.py`** — command-bar parsing and fuzzy ranking. Deliberately free
-  of Textual imports so it is testable standalone.
-- **`tui/`** — Textual app and modal screens.
+- **`transport.py`** — `ParamikoTransport` (default, in-process) and
+  `SystemSSHTransport` (opt-in per host, local PTY around the system `ssh`).
+  Both satisfy the same `Transport` protocol: read/write/resize/close.
+- **`terminal.py`** — pyte wrapper plus key-event → terminal-byte encoding. No
+  Textual imports, so escape-sequence handling is testable standalone.
+- **`sessions.py`** — `Session` (transport + emulator + status) and
+  `SessionManager`. No Textual imports either.
+- **`completion.py`** — command-bar parsing and fuzzy ranking. Also Textual-free.
+- **`tui/`** — the Textual app, the `TerminalPane` widget, modal screens.
 
-`cli.py` is thin: it fixes the locale, then either draws the UI or re-execs into
-tmux.
+### How a session works
 
-### The tmux launch model
+Connecting is threaded end to end because none of it may block the UI:
 
-Running `remotely` outside tmux **re-executes itself** as `tmux attach` against a
-session whose window 0 runs `remotely --ui`. That indirection is what makes SSH
-sessions real tabs. Consequences:
+1. `SessionManager.open()` returns immediately with status `connecting` and does
+   the handshake on a background thread — DNS, TCP and auth can take seconds.
+2. On success a **reader thread** polls `transport.read()` every 20 ms and
+   appends bytes to a buffer under a lock.
+3. `TerminalPane` drains that buffer on a **30 fps timer**, not on arrival. A
+   chatty remote command would otherwise trigger one repaint per packet.
+4. Rendering goes through `render_line`, not `render`, so Textual repaints only
+   the rows that changed. Styles are cached — a screen is thousands of cells but
+   only a handful of distinct styles.
 
-- `--ui` means "the tmux window already exists, just draw". It is internal.
-- If already inside tmux, Remotely adopts the *current* session rather than
-  creating its own, so it does not hijack a user's existing setup.
-- Windows Remotely created are tagged with the tmux user option
-  `@remotely_host`. That tag is the only way `list_tabs` identifies them, so a
-  window the user opened by hand is never touched.
+### Password handling
 
-### Two non-obvious constraints
+Passwords go **straight into the SSH handshake in-process**. They are never
+written to disk, never put in an environment variable, never placed on a command
+line, and no helper process ever sees them. There is deliberately no askpass
+file, no temp file and no sshpass.
 
-**A UTF-8 locale is mandatory.** Without one, tmux emits format output libtmux
-cannot parse and session creation fails with an opaque
-`zip() argument 2 is shorter than argument 1`. `ensure_utf8_locale()` sets
-`LC_CTYPE` (and only `LC_CTYPE`) when the environment lacks one. Do not remove
-this. Note that CPython's PEP 538 coercion already handles the plain `C` case,
-so the guard matters for `LC_ALL` set to a non-UTF-8 value.
+This is why `SystemSSHTransport` refuses a stored password rather than trying to
+smuggle it across a process boundary — reintroducing that path would undo the
+main security gain of the rewrite.
 
-Theme icons are separate and purely cosmetic: tmux stores tab names verbatim,
-but a client under a non-UTF-8 locale *renders* them as `__`, which is why
-themes carry an `ascii_icon`.
+### Keys the terminal must not swallow
 
-**Commands are wrapped by `hold_on_failure()`.** A window whose command dies
-instantly takes the window with it before libtmux can read the window id back,
-turning "ssh not found" into an internal error. The tmux option for this
-(`remain-on-exit`) is a *window* option, so it cannot be set on a session and
-inherited, and setting it globally would alter the user's whole server. The
-wrapper blocks on `read` after a non-zero exit instead. A clean exit still
-closes the tab.
-
-### Password delivery
-
-Secrets reach ssh through `SSH_ASKPASS`, never argv or a persistent env var:
-
-1. `stage_secret()` writes the secret to `~/.remotely/run/askpass-<ts>-<token>`,
-   mode `0600` inside a `0700` directory, created with the right mode from the
-   start.
-2. `SSH_ASKPASS` points at the `remotely-askpass` console script and
-   `SSH_ASKPASS_REQUIRE=force` makes ssh consult it despite having a TTY
-   (OpenSSH 8.4+; older versions fall back to prompting).
-3. The helper prints the secret once and unlinks it. A replay returns exit 1
-   rather than an empty string, so ssh prompts instead of trying to auth with "".
-4. `sweep_stale_secrets()` clears debris older than 5 minutes on each launch.
-
-When running from a source checkout there is no `remotely-askpass` on PATH, so
-`find_askpass_helper()` generates a shim in `~/.remotely/run/`.
+`tui/terminal.py:RESERVED_KEYS` is the escape hatch: `ctrl+w`, `ctrl+q`, `f1`
+and the tab-switch keys never reach the remote, so the user can always get back
+to the launcher. **Everything else must pass through**, including `ctrl+c` and
+`ctrl+d` — intercepting those would break the shell.
 
 ### ssh_options semantics
 
-`None` means "not configured" and takes `DEFAULT_SSH_OPTIONS`; an empty list
-explicitly means "no extra options". These are distinct and both are persisted.
-Auth-derived options are merged *underneath* the host's, so a host option always
-wins on the same key. In the host form, blank means defaults and `-` means none.
+`None` means "not configured" and takes defaults; an empty list explicitly means
+"no extra options". Both are persisted and distinct. `build_spec()` natively
+honours `ConnectTimeout`, `ServerAliveInterval` and `StrictHostKeyChecking`;
+anything else is recorded in `spec.notes` and surfaced in the UI as
+system-ssh-only rather than being silently dropped.
+
+### Host keys
+
+`~/.ssh/known_hosts` is loaded read-only; `~/.remotely/known_hosts` (mode 0600)
+is the writable store. Policy is `accept-new`: unknown hosts are learned, but a
+**changed** key raises. `StrictHostKeyChecking=yes` on a host switches to
+`RejectPolicy`. There is a test for the changed-key case — keep it.
 
 ## Testing
 
-`tests/` uses an autouse fixture that repoints `REMOTELY_HOME` at a temp dir, so
-tests can never touch real user data. The tmux tests run against a **real tmux
-server** on a private socket rather than a mock, and skip when tmux is absent.
-TUI tests drive the app headlessly via Textual's `run_test()` pilot.
+`tests/conftest.py` repoints `REMOTELY_HOME` at a temp dir for every test, so
+tests can never touch real user data.
 
-Run with `-W error::DeprecationWarning`; libtmux has deprecated aliases
-(`set_window_option`, `show_window_option`) that the code deliberately only
-falls back to when the modern name is absent.
+`tests/sshserver.py` is a **real SSH server** built on paramiko's server side.
+Transport, session and TUI tests connect to it over a real socket with a real
+key exchange and a real channel. Do not replace it with mocks — a bundled SSH
+client is only trustworthy if it is tested against an actual handshake. It also
+caught a genuine bug: paramiko 5.0 removed `DSSKey`, which would have broken all
+key auth.
+
+Key generation is slow, so `host_key` is a module-scoped fixture.
+
+Run with `-W error::DeprecationWarning`.
+
+## Packaging
+
+`remotely.spec` bundles the interpreter and dependencies. Two things there are
+load-bearing:
+
+- **`hiddenimports`** — paramiko selects key and cipher backends dynamically, so
+  the import graph does not reach them; `collect_submodules("paramiko")` plus the
+  explicit `cryptography`/`nacl` entries are required. Textual and Rich need
+  `collect_all` for their runtime data files.
+- **`src/remotely/__main__.py` uses an absolute import.** PyInstaller runs it as
+  a top-level script with no package context, so a relative import fails in the
+  bundle while working fine from source. Do not "tidy" it back to relative.
 
 ## Versioning and release
 
 `__version__` in `src/remotely/__init__.py` is the single source of truth;
 `pyproject.toml` reads it via `[tool.hatch.version]`. **Do not add a static
 `version =` back to `pyproject.toml`** — the release workflow rewrites only the
-`__init__.py` line, and a second copy would silently drift.
+`__init__.py` line, and a second copy would drift.
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`: validate tag → inject
-version → test → `uv build` → assert the wheel contains the bundled themes and
-`app.tcss` → smoke test the wheel → publish a GitHub release. The wheel-contents
-check exists because a wheel missing those data files installs fine and only
-fails at runtime.
+Pushing a `v*` tag runs `.github/workflows/release.yml`: validate tag → test →
+build binaries for macOS arm64, macOS x86_64 and Linux x86_64 → verify each one
+runs in a sandbox with `python`, `uv`, `tmux`, `ssh` and `sshpass` absent from
+`PATH` → publish with checksums, plus a wheel and sdist.
 
-CI (`.github/workflows/ci.yml`) runs the suite on Linux and macOS across Python
-3.11–3.13, installing tmux on the runner first so the tmux tests actually
-execute rather than skipping.
+That sandbox check is the one that matters. A binary that only works because the
+build machine happens to have something installed is the exact failure this
+design exists to prevent.

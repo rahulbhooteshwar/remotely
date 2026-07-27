@@ -47,6 +47,10 @@ class Host:
     #: ``None`` means "not configured, use defaults". An empty list explicitly
     #: means "no extra options" - the same distinction Connectify draws.
     ssh_options: list[str] | None = None
+    #: Shell out to the host's ``ssh`` instead of the built-in client. Opt-in,
+    #: for setups the bundled client cannot express (ProxyCommand, GSSAPI).
+    #: Requires ssh to be installed and rules out stored passwords.
+    use_system_ssh: bool = False
     description: str = ""
 
     def __post_init__(self) -> None:
@@ -92,6 +96,7 @@ class Host:
             auth_mode=auth_mode,  # type: ignore[arg-type]
             credential=raw.get("credential") or None,
             ssh_options=list(opts) if isinstance(opts, list) else None,
+            use_system_ssh=bool(raw.get("use_system_ssh", False)),
             description=_clean_str(raw.get("description")),
         )
 
@@ -109,6 +114,16 @@ class Host:
         if self.auth_mode == "credential" and not self.credential:
             problems.append("Pick a credential or switch auth to 'agent'.")
         return problems
+
+    def warnings(self, *, credential_kind: str | None = None) -> list[str]:
+        """Non-blocking advice shown next to the host, not enforced."""
+        notes: list[str] = []
+        if self.use_system_ssh and credential_kind == "password":
+            notes.append(
+                "System ssh cannot receive a stored password; this host will "
+                "prompt. Turn off 'use system ssh' to use the built-in client."
+            )
+        return notes
 
 
 @dataclass(slots=True)

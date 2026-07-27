@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import TYPE_CHECKING, Iterable, Sequence
 
 from textual import on
 from textual.app import ComposeResult
@@ -11,6 +11,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
+    Checkbox,
     Input,
     Label,
     OptionList,
@@ -20,8 +21,10 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from ..models import Credential, Host, UNGROUPED
-from ..sessions import SessionTab
 from ..themes import Theme
+
+if TYPE_CHECKING:  # avoids a cycle: sessions imports themes, screens imports both
+    from ..sessions import Session
 
 AGENT_CHOICE = "__agent__"
 
@@ -273,6 +276,18 @@ class HostFormScreen(ModalScreen[Host | None]):
                         id="ssh_options",
                     ),
                 )
+                yield Checkbox(
+                    "Use the system ssh binary for this host",
+                    value=host.use_system_ssh if host else False,
+                    id="use_system_ssh",
+                )
+                yield Static(
+                    "The built-in client needs nothing installed and is the "
+                    "default. Turn this on only for setups it cannot express "
+                    "(ProxyCommand, GSSAPI) - it requires ssh on PATH and "
+                    "cannot use a stored password.",
+                    classes="modal-help",
+                )
                 yield _field(
                     "Description", Input(value=host.description if host else "", id="description")
                 )
@@ -325,6 +340,7 @@ class HostFormScreen(ModalScreen[Host | None]):
             auth_mode=auth_mode,  # type: ignore[arg-type]
             credential=credential,
             ssh_options=ssh_options,
+            use_system_ssh=bool(self.query_one("#use_system_ssh", Checkbox).value),
             description=value_of("description"),
         )
 
@@ -522,17 +538,23 @@ class HelpScreen(ModalScreen[None]):
   ctrl+d           delete highlighted host
   ctrl+t           themes
   ctrl+k           vault
-  ctrl+l           open session tabs
+  ctrl+l           open sessions
   ctrl+r           reload config from disk
   f1               this help
-  ctrl+q           quit Remotely (sessions keep running)
+  ctrl+q           quit Remotely and close every session
+
+[b]Inside a session[/b]
+  ctrl+w           back to the launcher
+  ctrl+pageup      previous tab
+  ctrl+pagedown    next tab
+  Every other key goes to the remote shell, including ctrl+c and ctrl+d.
 
 [b]Commands[/b]
   /connect <host>  launch a host
   /add             add a host
   /edit <host>     edit a host
   /delete <host>   delete a host
-  /sessions        list open tabs
+  /sessions        list open sessions
   /themes          browse and clone themes
   /vault           manage credentials
   /lock            lock the vault
@@ -541,11 +563,9 @@ class HelpScreen(ModalScreen[None]):
   /help            this help
   /quit            exit
 
-[b]Tabs[/b]
-  Sessions open as tmux windows in the 'remotely' session.
-  ctrl+b n / p     next / previous tab
-  ctrl+b 0         back to Remotely
-  ctrl+b d         detach, leaving every session running
+[b]About sessions[/b]
+  Sessions run inside Remotely using its own SSH client, so nothing needs
+  to be installed. They close when you quit - there is no detach.
 """
 
     def compose(self) -> ComposeResult:
@@ -600,13 +620,23 @@ def credential_options(credentials: Sequence[Credential], usage: dict[str, int])
     return rows
 
 
-def session_options(tabs: Sequence[SessionTab]) -> list[Option]:
-    """Build picker rows for the open-tabs browser."""
-    return [
-        Option(
-            f"{'▶ ' if tab.active else '  '}[b]{tab.host}[/b]  [dim]tab {tab.index}"
-            f"{'  ' + tab.theme if tab.theme else ''}[/dim]",
-            id=tab.window_id,
+def session_options(sessions: Sequence["Session"]) -> list[Option]:
+    """Build picker rows for the open-sessions browser."""
+    marks = {
+        "connecting": ("[yellow]…[/yellow]", "connecting"),
+        "connected": ("[green]●[/green]", "connected"),
+        "closed": ("[dim]○[/dim]", "closed"),
+        "error": ("[red]✗[/red]", "failed"),
+    }
+    rows: list[Option] = []
+    for session in sessions:
+        mark, label = marks.get(session.status, ("•", session.status))
+        detail = session.error if session.status == "error" else label
+        rows.append(
+            Option(
+                f"{mark} [b]{session.host_name}[/b]  [dim]{session.theme.name}[/dim]\n"
+                f"    [dim]{detail}[/dim]",
+                id=session.id,
+            )
         )
-        for tab in tabs
-    ]
+    return rows

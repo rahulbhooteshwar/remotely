@@ -21,13 +21,13 @@ classifiers = [
 dependencies = [
     "textual>=0.79",
     "rich>=13.7",
-    "libtmux>=0.37",
     "cryptography>=42.0",
+    "paramiko>=5.0.0",
+    "pyte>=0.8.2",
 ]
 
 [project.scripts]
 remotely = "remotely.cli:main"
-remotely-askpass = "remotely.askpass:main"
 
 [project.urls]
 Homepage = "https://github.com/rahulbhooteshwar/remotely"
@@ -36,6 +36,7 @@ Changelog = "https://github.com/rahulbhooteshwar/remotely/releases"
 
 [dependency-groups]
 dev = [
+    "pyinstaller>=6.21.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]

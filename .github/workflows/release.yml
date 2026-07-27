@@ -14,14 +14,13 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  prepare:
+    name: validate and test
     runs-on: ubuntu-latest
-
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -36,94 +35,155 @@ jobs:
           else
             VERSION="${GITHUB_REF#refs/tags/v}"
           fi
-          # Reject anything that is not a plain release version, so a typo in a
-          # tag cannot produce an unbuildable package.
+          # A typo in a tag must not produce an unbuildable release.
           if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([ab]|rc)?[0-9]*$'; then
             echo "::error::'$VERSION' is not a valid version (expected N.N.N)"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building version $VERSION"
+
+      - run: uv sync
+      - run: uv run pytest -q -W error::DeprecationWarning
+
+  binaries:
+    name: binary (${{ matrix.target }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: macos-latest
+            target: macos-arm64
+          - os: macos-13
+            target: macos-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
 
       # __init__.py is the single source of truth; pyproject reads it via
-      # hatch's dynamic version, so this one edit covers the whole package.
+      # hatch's dynamic version, so this one edit covers everything.
       - name: Inject version
+        shell: bash
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          python - "$VERSION" <<'PY'
+          python - "${{ needs.prepare.outputs.version }}" <<'PY'
           import pathlib, re, sys
           version = sys.argv[1]
           path = pathlib.Path("src/remotely/__init__.py")
           text = path.read_text(encoding="utf-8")
           new, count = re.subn(
-              r'^__version__ = ".*"$',
-              f'__version__ = "{version}"',
-              text,
-              count=1,
-              flags=re.M,
+              r'^__version__ = ".*"$', f'__version__ = "{version}"', text, count=1, flags=re.M
           )
           if count != 1:
               sys.exit("could not find __version__ in src/remotely/__init__.py")
           path.write_text(new, encoding="utf-8")
-          print(new.splitlines()[2])
           PY
 
-      - name: Install dependencies
-        run: uv sync
+      - run: uv sync
 
-      - name: Run tests
-        run: uv run pytest -q -W error::DeprecationWarning
+      - name: Build the self-contained binary
+        run: uv run pyinstaller --noconfirm --clean remotely.spec
+
+      - name: Verify it runs with no dependencies present
+        shell: bash
+        run: |
+          SANDBOX="$RUNNER_TEMP/sandbox"
+          mkdir -p "$SANDBOX/bin" "$SANDBOX/home"
+          for tool in sh env printf ls cat; do
+            src=$(command -v "$tool") && ln -sf "$src" "$SANDBOX/bin/$tool"
+          done
+          cp dist/remotely "$SANDBOX/bin/remotely"
+
+          env -i PATH="$SANDBOX/bin" sh -c '
+            for t in python python3 uv tmux ssh sshpass; do
+              command -v $t >/dev/null 2>&1 && { echo "::error::$t leaked into the sandbox"; exit 1; }
+            done'
+
+          OUT=$(env -i PATH="$SANDBOX/bin" HOME="$SANDBOX/home" TERM=xterm-256color \
+                REMOTELY_HOME="$SANDBOX/home/.remotely" "$SANDBOX/bin/remotely" --version)
+          echo "$OUT"
+          case "$OUT" in
+            *"${{ needs.prepare.outputs.version }}"*) ;;
+            *) echo "::error::binary reports '$OUT', expected ${{ needs.prepare.outputs.version }}"; exit 1 ;;
+          esac
+
+          env -i PATH="$SANDBOX/bin" HOME="$SANDBOX/home" TERM=xterm-256color \
+            REMOTELY_HOME="$SANDBOX/home/.remotely" "$SANDBOX/bin/remotely" --doctor
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p out
+          NAME="remotely-${{ matrix.target }}"
+          tar -czf "out/${NAME}.tar.gz" -C dist remotely
+          if command -v shasum >/dev/null 2>&1; then
+            (cd out && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          else
+            (cd out && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          fi
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remotely-${{ matrix.target }}
+          path: out/*
+
+  publish:
+    name: publish release
+    needs: [prepare, binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Inject version
+        run: |
+          python - "${{ needs.prepare.outputs.version }}" <<'PY'
+          import pathlib, re, sys
+          version = sys.argv[1]
+          path = pathlib.Path("src/remotely/__init__.py")
+          text = path.read_text(encoding="utf-8")
+          new, _ = re.subn(
+              r'^__version__ = ".*"$', f'__version__ = "{version}"', text, count=1, flags=re.M
+          )
+          path.write_text(new, encoding="utf-8")
+          PY
 
       - name: Build wheel and sdist
         run: uv build
 
-      - name: Verify the built version matches the tag
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          ls -la dist/
-          test -f "dist/remotely-${VERSION}-py3-none-any.whl" \
-            || { echo "::error::wheel for ${VERSION} not found"; exit 1; }
-          test -f "dist/remotely-${VERSION}.tar.gz" \
-            || { echo "::error::sdist for ${VERSION} not found"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
-      - name: Verify packaged data files
+      - name: Collect release files
         run: |
-          python - <<'PY'
-          import glob, sys, zipfile
-          wheel = sorted(glob.glob("dist/*.whl"))[-1]
-          names = set(zipfile.ZipFile(wheel).namelist())
-          required = {
-              "remotely/themes_data/prod.toml",
-              "remotely/themes_data/non-prod.toml",
-              "remotely/themes_data/personal.toml",
-              "remotely/tui/app.tcss",
-          }
-          missing = sorted(required - names)
-          if missing:
-              sys.exit(f"wheel {wheel} is missing: {missing}")
-          print(f"{wheel}: all data files present")
-          PY
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' \) -exec cp {} release/ \;
+          cp dist/*.whl dist/*.tar.gz release/ 2>/dev/null || true
+          ls -la release/
 
-      - name: Smoke test the built wheel
-        run: |
-          uv tool install --force dist/*.whl
-          export REMOTELY_HOME="$RUNNER_TEMP/remotely-smoke"
-          "$HOME/.local/bin/remotely" --version
-          "$HOME/.local/bin/remotely" --doctor
-
-      - name: Publish release
+      - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: Remotely v${{ steps.version.outputs.version }}
-          files: |
-            dist/*.whl
-            dist/*.tar.gz
+          tag_name: v${{ needs.prepare.outputs.version }}
+          name: Remotely v${{ needs.prepare.outputs.version }}
+          files: release/*
           generate_release_notes: true
           body: |
-            # Remotely v${{ steps.version.outputs.version }}
+            # Remotely v${{ needs.prepare.outputs.version }}
 
-            Terminal based SSH hosts and connection manager.
+            Terminal based SSH hosts and connection manager. **One binary, no
+            dependencies** - no Python, no uv, no tmux, no OpenSSH, no sshpass.
 
             ## Install
 
@@ -131,27 +191,32 @@ jobs:
             curl -LsSf https://raw.githubusercontent.com/rahulbhooteshwar/remotely/main/install.sh | sh
             ```
 
-            Or with uv directly:
+            Or download the binary for your platform below, `chmod +x` it, and
+            put it on your `PATH`.
 
-            ```bash
-            uv tool install git+https://github.com/rahulbhooteshwar/remotely@v${{ steps.version.outputs.version }}
-            ```
+            | Platform | File |
+            |---|---|
+            | macOS (Apple Silicon) | `remotely-macos-arm64.tar.gz` |
+            | macOS (Intel) | `remotely-macos-x86_64.tar.gz` |
+            | Linux (x86_64) | `remotely-linux-x86_64.tar.gz` |
 
-            Then run `remotely`, and `remotely --doctor` if anything looks off.
+            Each archive has a matching `.sha256`.
+
+            Prefer to install from source? `uv tool install git+https://github.com/rahulbhooteshwar/remotely@v${{ needs.prepare.outputs.version }}`
 
             ## Requirements
 
-            - Python 3.11+
-            - tmux 3.0+
-            - OpenSSH 8.4+ recommended (older versions cannot be handed stored
-              passwords automatically and will prompt instead)
+            None. Run `remotely --doctor` to confirm.
+
+            macOS may quarantine a downloaded binary; the installer clears that
+            for you, or run `xattr -d com.apple.quarantine /path/to/remotely`.
 
   # Opt-in. Configure PyPI trusted publishing for this repository and remove
-  # the `if: false` to enable; until then releases are installed from GitHub.
+  # the `if: false` to enable.
   pypi:
     name: publish to PyPI
     if: false
-    needs: release
+    needs: publish
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

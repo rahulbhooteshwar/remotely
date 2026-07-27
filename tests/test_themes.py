@@ -1,4 +1,4 @@
-"""Theme discovery, overriding and tmux option mapping."""
+"""Theme discovery, overriding and pane styling."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def test_bundled_themes_are_complete(themes: ThemeRegistry) -> None:
         assert theme.description
         assert theme.accent.startswith("#")
         assert theme.icon
-        assert theme.tmux_window_options()
+        assert theme.pane_styles()
 
 
 def test_user_theme_is_picked_up() -> None:
@@ -56,20 +56,37 @@ def test_malformed_theme_is_reported_not_fatal() -> None:
     assert any("broken.toml" in error for error in registry.errors)
 
 
-def test_tmux_option_names_are_mapped() -> None:
+def test_pane_styles_come_from_colors() -> None:
     theme = Theme(
         name="t",
-        tmux={"window_style": "bg=#000", "pane_active_border_style": "fg=#fff"},
+        colors={"background": "#101010", "foreground": "#eeeeee", "accent": "#ff0000"},
     )
-    options = theme.tmux_window_options()
-    assert options["window-style"] == "bg=#000"
-    assert options["pane-active-border-style"] == "fg=#fff"
+    styles = theme.pane_styles()
+    assert styles["background"] == "#101010"
+    assert styles["color"] == "#eeeeee"
+    assert styles["border_color"] == "#ff0000"
 
 
-def test_unknown_tmux_keys_pass_through() -> None:
-    # A theme should be able to reach any tmux option without a code change.
-    theme = Theme(name="t", tmux={"monitor_activity": "on"})
-    assert theme.tmux_window_options()["monitor-activity"] == "on"
+def test_terminal_section_overrides_colors() -> None:
+    theme = Theme(
+        name="t",
+        colors={"background": "#101010", "accent": "#ff0000"},
+        terminal={"background": "#000000", "border": "#00ff00"},
+    )
+    styles = theme.pane_styles()
+    assert styles["background"] == "#000000"
+    assert styles["border_color"] == "#00ff00"
+
+
+def test_pane_styles_have_sane_defaults() -> None:
+    styles = Theme(name="bare").pane_styles()
+    assert all(value.startswith("#") for value in styles.values())
+
+
+def test_bundled_themes_define_distinct_pane_colours(themes: ThemeRegistry) -> None:
+    """Telling prod from non-prod at a glance is the whole point."""
+    backgrounds = {themes.get(n).pane_styles()["background"] for n in BUNDLED}
+    assert len(backgrounds) == len(BUNDLED)
 
 
 def test_tab_title_uses_format(themes: ThemeRegistry) -> None:
@@ -82,7 +99,7 @@ def test_tab_title_survives_bad_template() -> None:
 
 
 def test_tab_title_falls_back_to_ascii(themes: ThemeRegistry) -> None:
-    # Under a non-UTF-8 locale tmux would rewrite the emoji to underscores.
+    # A terminal that cannot render the icon should still get a usable marker.
     assert themes.get("prod").tab_title("web-1", unicode_ok=False) == "[!] web-1"
     assert themes.get("non-prod").tab_title("web-1", unicode_ok=False) == "[~] web-1"
 

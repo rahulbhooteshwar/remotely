@@ -23,17 +23,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The tmux backend is tested against a real server rather than a mock,
-      # so the runner needs the binary. Without it those tests skip and the
-      # most platform-specific part of the app goes unverified.
-      - name: Install tmux (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y tmux
-
-      - name: Install tmux (macOS)
-        if: runner.os == 'macOS'
-        run: brew install tmux
-
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -42,23 +31,80 @@ jobs:
       - name: Install dependencies
         run: uv sync --python ${{ matrix.python }}
 
-      - name: Show environment
-        run: |
-          uv run remotely --version
-          tmux -V
-          ssh -V 2>&1 || true
-          echo "LANG=${LANG:-unset} LC_ALL=${LC_ALL:-unset} LC_CTYPE=${LC_CTYPE:-unset}"
-
-      # Deprecation warnings are errors: libtmux keeps deprecated aliases that
-      # the backend must never fall back to on a supported version.
+      # The suite stands up a real SSH server with paramiko, so there is
+      # nothing to install on the runner - which is the point of the app.
       - name: Run tests
         run: uv run pytest -q -W error::DeprecationWarning
 
       - name: Diagnostics
-        run: uv run remotely --doctor || true
+        run: uv run remotely --doctor
 
-  build:
-    name: build distribution
+  binary:
+    name: binary (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: macos-latest
+            target: macos-arm64
+          - os: macos-13
+            target: macos-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build the self-contained binary
+        run: uv run pyinstaller --noconfirm --clean remotely.spec
+
+      # The binary is only worth shipping if it runs with nothing installed,
+      # so verify that rather than just that the file exists.
+      - name: Verify it runs with no dependencies present
+        shell: bash
+        run: |
+          SANDBOX="$RUNNER_TEMP/sandbox"
+          mkdir -p "$SANDBOX/bin" "$SANDBOX/home"
+          for tool in sh env printf ls cat; do
+            src=$(command -v "$tool") && ln -sf "$src" "$SANDBOX/bin/$tool"
+          done
+          cp dist/remotely "$SANDBOX/bin/remotely"
+
+          echo "Tools deliberately absent from PATH:"
+          env -i PATH="$SANDBOX/bin" sh -c '
+            for t in python python3 uv tmux ssh sshpass; do
+              command -v $t >/dev/null 2>&1 && { echo "  UNEXPECTEDLY PRESENT: $t"; exit 1; }
+              echo "  absent: $t"
+            done'
+
+          env -i PATH="$SANDBOX/bin" HOME="$SANDBOX/home" TERM=xterm-256color \
+            REMOTELY_HOME="$SANDBOX/home/.remotely" "$SANDBOX/bin/remotely" --version
+          env -i PATH="$SANDBOX/bin" HOME="$SANDBOX/home" TERM=xterm-256color \
+            REMOTELY_HOME="$SANDBOX/home/.remotely" "$SANDBOX/bin/remotely" --doctor
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p out
+          tar -czf "out/remotely-${{ matrix.target }}.tar.gz" -C dist remotely
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remotely-${{ matrix.target }}
+          path: out/*.tar.gz
+
+  package:
+    name: wheel and sdist
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,11 +114,10 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Build wheel and sdist
+      - name: Build
         run: uv build
 
-      # A wheel that is missing the bundled themes or the stylesheet installs
-      # cleanly and then fails at runtime, so check the contents explicitly.
+      # A wheel missing these installs cleanly and then fails at runtime.
       - name: Verify packaged data files
         run: |
           python - <<'PY'
@@ -90,13 +135,6 @@ jobs:
               sys.exit(f"wheel {wheel} is missing: {missing}")
           print(f"{wheel}: all {len(required)} data files present")
           PY
-
-      - name: Smoke test the built wheel
-        run: |
-          uv tool install --force dist/*.whl
-          export REMOTELY_HOME="$RUNNER_TEMP/remotely-smoke"
-          "$HOME/.local/bin/remotely" --version
-          "$HOME/.local/bin/remotely" --doctor
 
       - uses: actions/upload-artifact@v4
         with:

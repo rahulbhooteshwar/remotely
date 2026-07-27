@@ -28,23 +28,26 @@ warn() { printf '%s  !%s %s\n' "$YELLOW" "$NC" "$1"; }
 
 printf '\nUninstalling Remotely\n\n'
 
-# Sessions outlive the app, so close the managed one before removing the binary.
-if command -v tmux >/dev/null 2>&1; then
-    if tmux has-session -t remotely 2>/dev/null; then
-        tmux kill-session -t remotely 2>/dev/null || true
-        ok "Closed the 'remotely' tmux session"
+REMOVED=0
+
+# Binary install (the default).
+for dir in "$HOME/.local/bin" /usr/local/bin; do
+    if [ -f "$dir/remotely" ]; then
+        rm -f "$dir/remotely"
+        ok "Removed $dir/remotely"
+        REMOVED=1
+    fi
+done
+
+# Installed from source as a uv tool instead.
+if command -v uv >/dev/null 2>&1; then
+    if uv tool uninstall remotely >/dev/null 2>&1; then
+        ok "Removed the remotely uv tool"
+        REMOVED=1
     fi
 fi
 
-if command -v uv >/dev/null 2>&1; then
-    if uv tool uninstall remotely 2>/dev/null; then
-        ok "Removed the remotely tool"
-    else
-        warn "uv did not have remotely installed"
-    fi
-else
-    warn "uv not found; if you installed another way, remove it manually"
-fi
+[ "$REMOVED" -eq 1 ] || warn "No installed copy of remotely was found"
 
 CONFIG_DIR="$HOME/.remotely"
 if [ "$REMOVE_CONFIG" -eq 1 ]; then
