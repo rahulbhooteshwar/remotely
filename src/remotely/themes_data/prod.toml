@@ -1,0 +1,26 @@
+name = "prod"
+label = "Production"
+description = "High-alert red. Meant to be impossible to mistake for anything else."
+
+[colors]
+accent = "#ff5f5f"
+background = "#2a0d0d"
+foreground = "#ffd7d7"
+dim = "#a06a6a"
+
+[tmux]
+window_style = "bg=#2a0d0d,fg=#ffd7d7"
+window_active_style = "bg=#330f0f,fg=#ffe5e5"
+pane_border_style = "fg=#7a2b2b"
+pane_active_border_style = "fg=#ff5f5f,bold"
+window_status_style = "fg=#ff9f9f,bg=#3a1010"
+window_status_current_style = "fg=#2a0d0d,bg=#ff5f5f,bold"
+
+[tab]
+icon = "🔴"
+ascii_icon = "[!]"
+format = "{icon} {host}"
+
+[remote]
+prompt_color = "1;97;41"
+banner = "PROD"

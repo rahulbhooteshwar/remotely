@@ -1,0 +1,26 @@
+name = "personal"
+label = "Personal"
+description = "Calm teal. The default for home lab and personal boxes."
+
+[colors]
+accent = "#4ec9b0"
+background = "#0d2320"
+foreground = "#d4f5ee"
+dim = "#5f8f88"
+
+[tmux]
+window_style = "bg=#0d2320,fg=#d4f5ee"
+window_active_style = "bg=#0f2b27,fg=#e4fbf6"
+pane_border_style = "fg=#2b6157"
+pane_active_border_style = "fg=#4ec9b0,bold"
+window_status_style = "fg=#8fd9cb,bg=#103029"
+window_status_current_style = "fg=#0d2320,bg=#4ec9b0,bold"
+
+[tab]
+icon = "🟢"
+ascii_icon = "[+]"
+format = "{icon} {host}"
+
+[remote]
+prompt_color = "1;36"
+banner = ""

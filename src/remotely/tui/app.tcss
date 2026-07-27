@@ -1,0 +1,173 @@
+/* Remotely - terminal styling */
+
+Screen {
+    background: #0b0e14;
+    color: #c5cede;
+}
+
+#root {
+    height: 1fr;
+}
+
+#banner {
+    height: 1;
+    padding: 0 1;
+    background: #11151c;
+    color: #8b98b0;
+}
+
+#command-bar {
+    margin: 1 1 0 1;
+    border: tall #2a3446;
+    background: #11151c;
+}
+
+#command-bar:focus {
+    border: tall #7aa2f7;
+}
+
+#body {
+    height: 1fr;
+    margin: 1 1 0 1;
+}
+
+#results {
+    width: 2fr;
+    border: round #2a3446;
+    background: #0d1117;
+    padding: 0 1;
+    scrollbar-size-vertical: 1;
+}
+
+#results:focus {
+    border: round #2a3446;
+}
+
+#detail-pane {
+    width: 1fr;
+    border: round #2a3446;
+    background: #0d1117;
+    padding: 0 1;
+    margin-left: 1;
+    scrollbar-size-vertical: 1;
+}
+
+#status {
+    height: auto;
+    min-height: 1;
+    padding: 0 2;
+    color: #8b98b0;
+}
+
+#status.error {
+    color: #ff7b72;
+}
+
+.error {
+    color: #ff7b72;
+    height: auto;
+}
+
+/* ------------------------------------------------------------------ modals */
+
+.modal {
+    background: #11151c;
+    border: thick #2a3446;
+    padding: 1 2;
+}
+
+.modal-narrow {
+    width: 60;
+    height: auto;
+    max-height: 80%;
+}
+
+.modal-wide {
+    width: 84;
+    height: auto;
+    max-height: 90%;
+}
+
+.modal-title {
+    text-style: bold;
+    color: #7aa2f7;
+    padding-bottom: 1;
+}
+
+.modal-help {
+    color: #8b98b0;
+    padding-bottom: 1;
+    height: auto;
+}
+
+.modal-help.empty {
+    padding: 2 0;
+    text-align: center;
+}
+
+.modal-buttons {
+    height: auto;
+    align-horizontal: right;
+    padding-top: 1;
+}
+
+.modal-buttons Button {
+    margin-left: 2;
+    min-width: 12;
+}
+
+.form-scroll {
+    height: auto;
+    max-height: 24;
+    scrollbar-size-vertical: 1;
+}
+
+.field {
+    height: auto;
+    padding-bottom: 1;
+    width: 1fr;
+}
+
+.field-row {
+    height: auto;
+}
+
+.field-row .field {
+    margin-right: 2;
+}
+
+.field-label {
+    color: #8b98b0;
+}
+
+.modal OptionList {
+    height: auto;
+    max-height: 22;
+    background: #0d1117;
+    border: round #2a3446;
+    padding: 0 1;
+}
+
+MyOptionList > .option-list--option-highlighted,
+OptionList > .option-list--option-highlighted {
+    background: #1f2937;
+    color: #e6edf3;
+    text-style: bold;
+}
+
+Input {
+    background: #0d1117;
+    border: tall #2a3446;
+}
+
+Input:focus {
+    border: tall #7aa2f7;
+}
+
+Select {
+    background: #0d1117;
+}
+
+Footer {
+    background: #11151c;
+}
