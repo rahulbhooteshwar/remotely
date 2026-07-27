@@ -1,17 +1,21 @@
 #!/bin/sh
 # Remotely installer - terminal based SSH hosts and connection manager.
 #
-#   curl -LsSf https://raw.githubusercontent.com/rahulbhooteshwar/connectify-iterm2/main/remotely/install.sh | sh
+#   curl -LsSf https://raw.githubusercontent.com/rahulbhooteshwar/remotely/main/install.sh | sh
 #
 # Installs Remotely as a uv tool. POSIX sh on purpose so it runs under
 # sh, bash, dash and zsh without modification.
+#
+# Environment overrides:
+#   REMOTELY_REPO     owner/name to install from      (default rahulbhooteshwar/remotely)
+#   REMOTELY_REF      branch or tag to install        (default main)
+#   REMOTELY_SPEC     full uv install spec, wins over the above
 
 set -eu
 
-REPO="${REMOTELY_REPO:-rahulbhooteshwar/connectify-iterm2}"
-BRANCH="${REMOTELY_BRANCH:-main}"
-SUBDIR="remotely"
-SPEC="${REMOTELY_SPEC:-git+https://github.com/${REPO}@${BRANCH}#subdirectory=${SUBDIR}}"
+REPO="${REMOTELY_REPO:-rahulbhooteshwar/remotely}"
+REF="${REMOTELY_REF:-main}"
+SPEC="${REMOTELY_SPEC:-git+https://github.com/${REPO}@${REF}}"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     RED=$(printf '\033[0;31m'); GREEN=$(printf '\033[0;32m')

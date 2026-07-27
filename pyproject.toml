@@ -1,6 +1,9 @@
 [project]
 name = "remotely"
-version = "0.1.0"
+# Single source of truth is src/remotely/__init__.py, which the release
+# workflow rewrites from the git tag. Keeping it in one place stops the
+# package version and the reported version drifting apart.
+dynamic = ["version"]
 description = "Remotely - Terminal based SSH hosts and connection manager"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,8 +30,9 @@ remotely = "remotely.cli:main"
 remotely-askpass = "remotely.askpass:main"
 
 [project.urls]
-Homepage = "https://github.com/rahulbhooteshwar/connectify-iterm2"
-Issues = "https://github.com/rahulbhooteshwar/connectify-iterm2/issues"
+Homepage = "https://github.com/rahulbhooteshwar/remotely"
+Issues = "https://github.com/rahulbhooteshwar/remotely/issues"
+Changelog = "https://github.com/rahulbhooteshwar/remotely/releases"
 
 [dependency-groups]
 dev = [
@@ -40,8 +44,14 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+path = "src/remotely/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/remotely"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/remotely", "tests", "README.md", "LICENSE", "Makefile"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

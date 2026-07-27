@@ -1,5 +1,10 @@
 # Remotely
 
+[![CI](https://github.com/rahulbhooteshwar/remotely/actions/workflows/ci.yml/badge.svg)](https://github.com/rahulbhooteshwar/remotely/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/rahulbhooteshwar/remotely?sort=semver)](https://github.com/rahulbhooteshwar/remotely/releases)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 **Terminal based SSH hosts and connection manager.**
 
 One command, one terminal. `remotely` opens a full-screen TUI that lists your
@@ -16,9 +21,11 @@ remotely
 
 ## Why it exists
 
-It is the successor to [Connectify](../README.md), which did the same job but
-was welded to macOS: iTerm2 for tabs, AppleScript for launching, and the Apple
-Keychain for passwords. Remotely keeps the ideas and drops the platform:
+It is the successor to
+[Connectify](https://github.com/rahulbhooteshwar/connectify-iterm2), which did
+the same job but was welded to macOS: iTerm2 for tabs, AppleScript for
+launching, and the Apple Keychain for passwords. Remotely keeps the ideas and
+drops the platform:
 
 | | Connectify | Remotely |
 |---|---|---|
@@ -37,34 +44,102 @@ Keychain for passwords. Remotely keeps the ideas and drops the platform:
 
 ## Install
 
-### As a uv tool (recommended)
+### Via the install script (recommended)
 
 ```bash
-uv tool install remotely
-```
-
-From a checkout:
-
-```bash
-uv tool install ./remotely
-```
-
-### Via the install script
-
-```bash
-curl -LsSf https://raw.githubusercontent.com/rahulbhooteshwar/connectify-iterm2/main/remotely/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/rahulbhooteshwar/remotely/main/install.sh | sh
 ```
 
 The script installs uv if it is missing, installs Remotely as a uv tool, checks
 for `tmux` and `ssh`, and makes sure `~/.local/bin` is on your `PATH`.
 
+### As a uv tool
+
+```bash
+uv tool install git+https://github.com/rahulbhooteshwar/remotely
+```
+
+Pin a release:
+
+```bash
+uv tool install git+https://github.com/rahulbhooteshwar/remotely@v0.1.0
+```
+
+Or install a wheel from the [releases page](https://github.com/rahulbhooteshwar/remotely/releases):
+
+```bash
+uv tool install ./remotely-0.1.0-py3-none-any.whl
+```
+
 ### For development
 
 ```bash
+git clone https://github.com/rahulbhooteshwar/remotely.git
 cd remotely
 uv sync
 uv run remotely
 ```
+
+### Upgrading and uninstalling
+
+```bash
+uv tool upgrade remotely
+uv tool uninstall remotely          # keeps ~/.remotely
+./uninstall.sh --remove-config      # removes configuration too
+```
+
+## End to end, first run
+
+From nothing to a themed production session:
+
+```bash
+# 1. install
+curl -LsSf https://raw.githubusercontent.com/rahulbhooteshwar/remotely/main/install.sh | sh
+
+# 2. check the environment (tmux, ssh, locale, askpass helper)
+remotely --doctor
+
+# 3. start it
+remotely
+```
+
+Remotely re-executes itself inside a tmux session and draws the UI in window 0.
+From there, everything happens in the command bar:
+
+```
+/vault                 -> create the vault, set the one passcode
+                          add a credential named "ldap" with your password
+ctrl+n                 -> new host form
+                          name      prod-web-01
+                          hostname  10.0.0.1
+                          username  deploy
+                          group     Production
+                          tags      web, critical
+                          theme     prod
+                          auth      credential: ldap
+prod                   -> fuzzy search finds it
+enter                  -> launches
+```
+
+What happens on that last keystroke:
+
+1. The host says `auth_mode = credential`, so the vault is unlocked (once per
+   session) and the `ldap` credential is read.
+2. `build_plan()` assembles the ssh argv. The password is **not** in it.
+3. The password is written to a one-shot `0600` file in `~/.remotely/run/`.
+4. A new tmux window opens running ssh, with `SSH_ASKPASS` pointing at the
+   `remotely-askpass` helper and `SSH_ASKPASS_REQUIRE=force`.
+5. ssh asks the helper for the password. The helper prints it once and unlinks
+   the file immediately.
+6. The window gets the `prod` theme: red background, red borders, `🔴` in the
+   tab title, and a tag identifying it as ours.
+
+You are now in a red-tinted production shell. `ctrl+b 0` returns to Remotely,
+`ctrl+b n` cycles tabs, `ctrl+b d` detaches and leaves every session running.
+
+Add a second host pointing at the same `ldap` credential and it just works -
+that is what "shared credentials" means here. Rotate the password once in
+`/vault` and every host that references it follows.
 
 ## Using it
 
@@ -231,17 +306,41 @@ An export containing secrets is written `0600` and warns you on the way out.
 ## Development
 
 ```bash
-cd remotely
 uv sync
-uv run remotely           # run it
-uv run pytest             # test it
+make run                  # or: uv run remotely
+make test                 # or: uv run pytest -q
+make doctor               # environment diagnostics
 uv run pytest tests/test_vault.py::test_wrong_passcode_rejected
 ```
 
-The test suite covers the vault, host store, theme loading, ssh command
-construction, and the completion engine. It runs anywhere - no tmux or ssh
-server needed, since the tmux backend is exercised through a fake.
+The suite covers the vault, host store, theme loading, ssh command
+construction, import/export and the completion engine. The tmux backend is
+exercised against a **real tmux server** on a private socket rather than a mock,
+and the TUI is driven headlessly through Textual's pilot. tmux tests skip
+automatically when tmux is not installed.
+
+CI runs the whole suite on Linux and macOS across Python 3.11, 3.12 and 3.13,
+then builds the distribution and smoke tests the resulting wheel.
+
+## Releasing
+
+Versions live in one place: `__version__` in `src/remotely/__init__.py`, which
+`pyproject.toml` reads through hatch's dynamic version. The release workflow
+rewrites it from the tag, so there is nothing to bump by hand.
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+That runs [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which validates the tag, injects the version, runs the tests, builds the wheel
+and sdist, verifies the bundled themes and stylesheet actually made it into the
+wheel, smoke tests the built artefact, and publishes a GitHub release.
+
+Publishing to PyPI is wired up but disabled. To enable it, configure trusted
+publishing for the repository and remove the `if: false` from the `pypi` job.
 
 ## Licence
 
-MIT
+[MIT](LICENSE)

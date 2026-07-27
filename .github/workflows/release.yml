@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, without the leading v (e.g. 1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+          # Reject anything that is not a plain release version, so a typo in a
+          # tag cannot produce an unbuildable package.
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([ab]|rc)?[0-9]*$'; then
+            echo "::error::'$VERSION' is not a valid version (expected N.N.N)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
+
+      # __init__.py is the single source of truth; pyproject reads it via
+      # hatch's dynamic version, so this one edit covers the whole package.
+      - name: Inject version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          python - "$VERSION" <<'PY'
+          import pathlib, re, sys
+          version = sys.argv[1]
+          path = pathlib.Path("src/remotely/__init__.py")
+          text = path.read_text(encoding="utf-8")
+          new, count = re.subn(
+              r'^__version__ = ".*"$',
+              f'__version__ = "{version}"',
+              text,
+              count=1,
+              flags=re.M,
+          )
+          if count != 1:
+              sys.exit("could not find __version__ in src/remotely/__init__.py")
+          path.write_text(new, encoding="utf-8")
+          print(new.splitlines()[2])
+          PY
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run tests
+        run: uv run pytest -q -W error::DeprecationWarning
+
+      - name: Build wheel and sdist
+        run: uv build
+
+      - name: Verify the built version matches the tag
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ls -la dist/
+          test -f "dist/remotely-${VERSION}-py3-none-any.whl" \
+            || { echo "::error::wheel for ${VERSION} not found"; exit 1; }
+          test -f "dist/remotely-${VERSION}.tar.gz" \
+            || { echo "::error::sdist for ${VERSION} not found"; exit 1; }
+
+      - name: Verify packaged data files
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheel = sorted(glob.glob("dist/*.whl"))[-1]
+          names = set(zipfile.ZipFile(wheel).namelist())
+          required = {
+              "remotely/themes_data/prod.toml",
+              "remotely/themes_data/non-prod.toml",
+              "remotely/themes_data/personal.toml",
+              "remotely/tui/app.tcss",
+          }
+          missing = sorted(required - names)
+          if missing:
+              sys.exit(f"wheel {wheel} is missing: {missing}")
+          print(f"{wheel}: all data files present")
+          PY
+
+      - name: Smoke test the built wheel
+        run: |
+          uv tool install --force dist/*.whl
+          export REMOTELY_HOME="$RUNNER_TEMP/remotely-smoke"
+          "$HOME/.local/bin/remotely" --version
+          "$HOME/.local/bin/remotely" --doctor
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Remotely v${{ steps.version.outputs.version }}
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          generate_release_notes: true
+          body: |
+            # Remotely v${{ steps.version.outputs.version }}
+
+            Terminal based SSH hosts and connection manager.
+
+            ## Install
+
+            ```bash
+            curl -LsSf https://raw.githubusercontent.com/rahulbhooteshwar/remotely/main/install.sh | sh
+            ```
+
+            Or with uv directly:
+
+            ```bash
+            uv tool install git+https://github.com/rahulbhooteshwar/remotely@v${{ steps.version.outputs.version }}
+            ```
+
+            Then run `remotely`, and `remotely --doctor` if anything looks off.
+
+            ## Requirements
+
+            - Python 3.11+
+            - tmux 3.0+
+            - OpenSSH 8.4+ recommended (older versions cannot be handed stored
+              passwords automatically and will prompt instead)
+
+  # Opt-in. Configure PyPI trusted publishing for this repository and remove
+  # the `if: false` to enable; until then releases are installed from GitHub.
+  pypi:
+    name: publish to PyPI
+    if: false
+    needs: release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1

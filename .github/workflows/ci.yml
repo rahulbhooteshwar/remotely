@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tmux backend is tested against a real server rather than a mock,
+      # so the runner needs the binary. Without it those tests skip and the
+      # most platform-specific part of the app goes unverified.
+      - name: Install tmux (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --python ${{ matrix.python }}
+
+      - name: Show environment
+        run: |
+          uv run remotely --version
+          tmux -V
+          ssh -V 2>&1 || true
+          echo "LANG=${LANG:-unset} LC_ALL=${LC_ALL:-unset} LC_CTYPE=${LC_CTYPE:-unset}"
+
+      # Deprecation warnings are errors: libtmux keeps deprecated aliases that
+      # the backend must never fall back to on a supported version.
+      - name: Run tests
+        run: uv run pytest -q -W error::DeprecationWarning
+
+      - name: Diagnostics
+        run: uv run remotely --doctor || true
+
+  build:
+    name: build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Build wheel and sdist
+        run: uv build
+
+      # A wheel that is missing the bundled themes or the stylesheet installs
+      # cleanly and then fails at runtime, so check the contents explicitly.
+      - name: Verify packaged data files
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheel = sorted(glob.glob("dist/*.whl"))[-1]
+          names = set(zipfile.ZipFile(wheel).namelist())
+          required = {
+              "remotely/themes_data/prod.toml",
+              "remotely/themes_data/non-prod.toml",
+              "remotely/themes_data/personal.toml",
+              "remotely/tui/app.tcss",
+          }
+          missing = sorted(required - names)
+          if missing:
+              sys.exit(f"wheel {wheel} is missing: {missing}")
+          print(f"{wheel}: all {len(required)} data files present")
+          PY
+
+      - name: Smoke test the built wheel
+        run: |
+          uv tool install --force dist/*.whl
+          export REMOTELY_HOME="$RUNNER_TEMP/remotely-smoke"
+          "$HOME/.local/bin/remotely" --version
+          "$HOME/.local/bin/remotely" --doctor
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

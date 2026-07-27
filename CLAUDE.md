@@ -5,12 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Remotely is a terminal SSH connection manager: a Textual TUI that launches SSH
-sessions as tmux windows. It is a from-scratch successor to Connectify (the
-repository root) and shares no code with it. Unlike Connectify it is **not**
-macOS-specific and has no web server — everything happens in one terminal.
+sessions as tmux windows. It is a from-scratch successor to
+[Connectify](https://github.com/rahulbhooteshwar/connectify-iterm2) and shares
+no code with it. Unlike Connectify it is **not** macOS-specific and has no web
+server — everything happens in one terminal.
 
-It lives in `remotely/` as a self-contained uv project with its own
-`pyproject.toml`, tests and lockfile. Run all commands from this directory.
+A uv project: `pyproject.toml`, `uv.lock`, sources under `src/remotely/`.
 
 ## Commands
 
@@ -123,3 +123,20 @@ TUI tests drive the app headlessly via Textual's `run_test()` pilot.
 Run with `-W error::DeprecationWarning`; libtmux has deprecated aliases
 (`set_window_option`, `show_window_option`) that the code deliberately only
 falls back to when the modern name is absent.
+
+## Versioning and release
+
+`__version__` in `src/remotely/__init__.py` is the single source of truth;
+`pyproject.toml` reads it via `[tool.hatch.version]`. **Do not add a static
+`version =` back to `pyproject.toml`** — the release workflow rewrites only the
+`__init__.py` line, and a second copy would silently drift.
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`: validate tag → inject
+version → test → `uv build` → assert the wheel contains the bundled themes and
+`app.tcss` → smoke test the wheel → publish a GitHub release. The wheel-contents
+check exists because a wheel missing those data files installs fine and only
+fails at runtime.
+
+CI (`.github/workflows/ci.yml`) runs the suite on Linux and macOS across Python
+3.11–3.13, installing tmux on the runner first so the tmux tests actually
+execute rather than skipping.
