@@ -538,3 +538,133 @@ async def test_close_command_reports_unknown_host() -> None:
         app._run_command("close", "nope")
         await pilot.pause()
         assert app.query_one("#status").has_class("error")
+
+
+async def test_rendered_segments_carry_selection_offsets() -> None:
+    """Drag-to-select needs offset metadata on every segment.
+
+    Regression: ALLOW_SELECT plus get_selection was not enough. Textual's
+    compositor maps a click back to content coordinates by reading
+    meta["offset"] from a segment's style; with plain segments it returns None
+    and the screen never begins a selection, so dragging did nothing at all.
+    """
+    from remotely.tui.terminal import TerminalPane
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        session.status = "connected"
+        session.emulator.feed(b"selectable text here\r\n")
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+        await pilot.pause()
+
+        strip = pane.render_line(0)
+        segments = list(strip)
+        assert segments, "nothing rendered"
+
+        offsets = [
+            seg.style.meta["offset"]
+            for seg in segments
+            if seg.style is not None and seg.style._meta is not None
+            and "offset" in seg.style.meta
+        ]
+        assert offsets, "no segment carried an 'offset' meta; selection cannot start"
+
+        # x must be the character index of the segment's start, y the row.
+        assert offsets[0] == (0, 0)
+        assert all(oy == 0 for _, oy in offsets)
+        assert offsets == sorted(offsets), "offsets must increase across the line"
+
+        # And row 1 reports row 1.
+        row1 = [
+            seg.style.meta["offset"]
+            for seg in pane.render_line(1)
+            if seg.style is not None and seg.style._meta is not None
+            and "offset" in seg.style.meta
+        ]
+        assert row1 and all(oy == 1 for _, oy in row1)
+        app.sessions.close_all()
+
+
+async def test_connecting_uses_the_rich_dots_spinner() -> None:
+    from rich.spinner import SPINNERS
+
+    from remotely.tui.terminal import TerminalPane, spinner_frame
+
+    frames = SPINNERS["dots"]["frames"]
+
+    # Clock-driven, so the rate does not depend on the repaint rate.
+    assert spinner_frame(0.0) == frames[0]
+    assert spinner_frame(0.08) == frames[1]
+    assert spinner_frame(0.08 * len(frames)) == frames[0], "must wrap around"
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+        if session.status == "connecting":
+            text = " ".join(line for line, _ in pane.notice_lines())
+            assert any(f in text for f in frames), "connecting notice has no dots frame"
+        app.sessions.close_all()
+
+
+async def test_left_click_drag_actually_selects_text() -> None:
+    """End to end drag-selection, the way a mouse does it.
+
+    The earlier test only asserted get_selection() worked when handed a
+    Selection, which passed while real dragging did nothing. This drives the
+    same path the compositor and screen use for a real mouse.
+    """
+    from textual.events import MouseMove
+
+    from remotely.tui.terminal import TerminalPane
+
+    app = build_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        session.status = "connected"
+        session.emulator.feed(b"HELLO-SELECT-ME world\r\n")
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+        await pilot.pause()
+
+        origin = pane.region.offset
+        # The precondition: the compositor must resolve a content offset.
+        _, offset = app.screen.get_widget_and_offset_at(origin.x + 2, origin.y)
+        assert offset is not None, "compositor cannot map the click to content"
+
+        await pilot.mouse_down(pane, offset=(0, 0))
+        await pilot.pause()
+        app.screen.post_message(
+            MouseMove(
+                widget=pane, x=11, y=0, delta_x=11, delta_y=0, button=1,
+                shift=False, meta=False, ctrl=False,
+                screen_x=origin.x + 11, screen_y=origin.y,
+            )
+        )
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.mouse_up(pane, offset=(11, 0))
+        await pilot.pause()
+
+        selected = app.screen.get_selected_text()
+        assert selected, "dragging produced no selection"
+        assert "HELLO-SELECT" in selected
+        app.sessions.close_all()

@@ -10,7 +10,10 @@ repaint per packet.
 
 from __future__ import annotations
 
+import time
+
 from rich.segment import Segment
+from rich.spinner import SPINNERS
 from rich.style import Style
 from textual import events
 from textual.message import Message
@@ -28,6 +31,23 @@ DRAIN_INTERVAL = 1 / 30
 #: step already moves a few lines.
 WHEEL_STEPS = 1
 PAGE_STEPS = 8
+
+#: Rich's "dots" spinner, taken from Rich itself so it stays in step with it.
+_DOTS = SPINNERS["dots"]
+SPINNER_FRAMES: str = _DOTS["frames"]
+SPINNER_INTERVAL: float = _DOTS["interval"] / 1000
+
+
+def spinner_frame(elapsed: float) -> str:
+    """The dots frame for a given elapsed time.
+
+    Driven by the clock rather than the repaint counter, so the spin rate stays
+    Rich's 80ms regardless of how often the pane happens to redraw.
+    """
+    if not SPINNER_FRAMES:
+        return ""
+    index = int(elapsed / SPINNER_INTERVAL) % len(SPINNER_FRAMES)
+    return SPINNER_FRAMES[index]
 
 
 class TerminalPane(Widget, can_focus=True):
@@ -66,7 +86,7 @@ class TerminalPane(Widget, can_focus=True):
         self._last_title = ""
         self._announced_close = False
         self._last_status = ""
-        self._spinner = 0
+        self._started = time.monotonic()
 
     # ------------------------------------------------------------------ setup
 
@@ -93,7 +113,6 @@ class TerminalPane(Widget, can_focus=True):
         # While connecting, keep repainting so the spinner turns and the user
         # can see something is actually happening.
         if session.status == "connecting":
-            self._spinner += 1
             changed = True
 
         if session.status != self._last_status:
@@ -213,21 +232,31 @@ class TerminalPane(Widget, can_focus=True):
         segments: list[Segment] = []
         run: list[str] = []
         run_style: Style | None = None
+        run_start = 0
+
+        def flush(end: int) -> None:
+            if not run:
+                return
+            # The compositor maps a click back to content coordinates by
+            # reading an "offset" from each segment's style meta. Without it
+            # get_widget_and_offset_at returns None and the screen refuses to
+            # begin a selection - so drag-to-select silently does nothing.
+            meta = Style.from_meta({"offset": (run_start, y)})
+            segments.append(Segment("".join(run), (run_style or Style()) + meta))
 
         for x, cell in enumerate(cells):
             style = _style_for(cell)
             if show_cursor and x == cursor_x:
-                style = style + Style(reverse=True)
+                style = style + _REVERSE
             if run_style is not None and style == run_style:
                 run.append(cell.char)
                 continue
-            if run:
-                segments.append(Segment("".join(run), run_style))
+            flush(x)
             run = [cell.char]
             run_style = style
+            run_start = x
 
-        if run:
-            segments.append(Segment("".join(run), run_style))
+        flush(len(cells))
 
         return Strip(segments, emulator.cols).adjust_cell_length(self.size.width)
 
@@ -239,7 +268,7 @@ class TerminalPane(Widget, can_focus=True):
         bad = Style(color="#ff7b72", bold=True)
 
         if session.status == "connecting":
-            frame = "|/-\\"[self._spinner // 6 % 4]
+            frame = spinner_frame(time.monotonic() - self._started)
             return [
                 (f"{frame}  Connecting to {session.host_name}", accent),
                 ("", dim),
@@ -285,6 +314,7 @@ RESERVED_KEYS = frozenset(
     }
 )
 
+_REVERSE = Style(reverse=True)
 _STYLE_CACHE: dict[tuple, Style] = {}
 
 
