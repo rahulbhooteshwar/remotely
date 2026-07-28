@@ -166,6 +166,16 @@ class TerminalEmulator:
         return max(0, history.size - history.position)
 
     @property
+    def bracketed_paste(self) -> bool:
+        """Whether the remote asked for pasted text to be bracketed.
+
+        Shells and editors turn this on (DECSET 2004) so they can tell typing
+        from pasting - which is what stops a multi-line paste executing itself
+        line by line. pyte stores private modes shifted by five bits.
+        """
+        return (2004 << 5) in self.screen.mode
+
+    @property
     def at_live_edge(self) -> bool:
         return self.scrollback_offset == 0
 

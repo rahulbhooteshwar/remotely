@@ -312,3 +312,12 @@ def test_a_broken_stream_is_recorded_not_raised() -> None:
 
     assert term.feed_errors == 1
     assert "RuntimeError" in (term.last_feed_error or "")
+
+
+def test_bracketed_paste_mode_is_tracked(term: TerminalEmulator) -> None:
+    """The remote decides whether pasted text should be bracketed."""
+    assert term.bracketed_paste is False
+    term.feed(b"\x1b[?2004h")
+    assert term.bracketed_paste is True
+    term.feed(b"\x1b[?2004l")
+    assert term.bracketed_paste is False

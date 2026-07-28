@@ -228,6 +228,37 @@ class TerminalPane(Widget, can_focus=True):
             session.emulator.scroll_to_live()
         session.write(data)
 
+    # ------------------------------------------------------------------ paste
+
+    def _on_paste(self, event: events.Paste) -> None:
+        """Send pasted text to the remote.
+
+        Without this the pane simply dropped it: Textual turns a bracketed
+        paste into a Paste event rather than a run of key presses, so nothing
+        in _on_key ever saw it and paste did nothing at all.
+        """
+        session = self.session
+        if not session.is_live or not event.text:
+            return
+        event.stop()
+        event.prevent_default()
+
+        # A terminal submits a line with CR; LF would move down without
+        # returning, so a pasted newline has to be translated.
+        text = event.text.replace("\r\n", "\r").replace("\n", "\r")
+        data = text.encode("utf-8", "replace")
+
+        # Wrap only when the remote asked for it. Bracketing unconditionally
+        # would leave the markers as literal junk in anything that has not
+        # enabled the mode, and not wrapping when it has costs the protection
+        # against a multi-line paste running itself line by line.
+        if session.emulator.bracketed_paste:
+            data = BRACKET_START + data + BRACKET_END
+
+        if not session.emulator.at_live_edge:
+            session.emulator.scroll_to_live()
+        session.write(data)
+
     # --------------------------------------------------------------- selection
 
     def _selection_style(self) -> Style:
@@ -494,6 +525,10 @@ class TerminalPane(Widget, can_focus=True):
             [Segment(" " * pad, bg), Segment(text, bg + style)]
         ).adjust_cell_length(width, self._blank_style)
 
+
+#: Markers a terminal wraps pasted text in when the remote enables DECSET 2004.
+BRACKET_START = b"\x1b[200~"
+BRACKET_END = b"\x1b[201~"
 
 #: Keys the terminal never swallows, so the launcher is always reachable.
 RESERVED_KEYS = frozenset(

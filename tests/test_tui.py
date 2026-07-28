@@ -1881,3 +1881,94 @@ async def test_export_writes_the_file_when_you_press_enter(tmp_path) -> None:
     assert target.exists(), "export did not write the file"
     payload = json.loads(target.read_text())
     assert {h["name"] for h in payload["hosts"]} == {"prod-web", "prod-db", "laptop"}
+
+
+async def test_paste_reaches_the_remote() -> None:
+    """Regression: paste did nothing at all.
+
+    Textual turns a bracketed paste into a Paste event rather than a run of
+    key presses, and the pane had no handler for it, so the text was dropped.
+    """
+    import paramiko
+    from textual import events
+
+    from remotely.models import Credential
+    from remotely.tui.terminal import TerminalPane
+
+    from .conftest import PASSCODE
+    from .sshserver import PASSWORD, USERNAME, SSHTestServer
+
+    with SSHTestServer(host_key=paramiko.RSAKey.generate(2048)) as server:
+        app = RemotelyApp()
+        app.store.add(
+            make_host("box", hostname=server.hostname, username=USERNAME,
+                      port=server.port, auth_mode="credential", credential="pw")
+        )
+        app.vault.initialise(PASSCODE)
+        app.vault.put(Credential(name="pw", kind="password", password=PASSWORD))
+
+        async with app.run_test(size=(90, 24)) as pilot:
+            await pilot.pause()
+            app._connect("box")
+            for _ in range(400):
+                await pilot.pause()
+                sessions = app.sessions.list()
+                if sessions and sessions[0].status == "connected":
+                    break
+            session = app.sessions.list()[0]
+            pane = app.query_one(f"#{session.id}", TerminalPane)
+            for _ in range(80):
+                await pilot.pause()
+                if "Welcome" in "\n".join(session.emulator.display()):
+                    break
+
+            pane._on_paste(events.Paste("whoami"))
+            for _ in range(40):
+                await pilot.pause()
+            session.write(b"\r")
+            for _ in range(150):
+                await pilot.pause()
+                if USERNAME in "\n".join(session.emulator.display()):
+                    break
+
+            screen = "\n".join(session.emulator.display())
+            assert USERNAME in screen, screen
+            app.sessions.close_all()
+
+
+async def test_paste_translates_newlines_and_honours_bracketing() -> None:
+    from textual import events
+
+    from remotely.tui.terminal import TerminalPane
+
+    app = build_app()
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        session.status = "connected"
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+
+        sent: list[bytes] = []
+        session.transport.write = lambda data: sent.append(data)
+
+        # A terminal submits a line with CR, not LF.
+        pane._on_paste(events.Paste("one\ntwo\r\nthree"))
+        assert sent[-1] == b"one\rtwo\rthree", sent[-1]
+
+        # Once the remote asks for bracketing, wrap it - that is what stops a
+        # multi-line paste running itself line by line.
+        session.emulator.feed(b"\x1b[?2004h")
+        pane._on_paste(events.Paste("rm -rf x\nls"))
+        assert sent[-1] == b"\x1b[200~rm -rf x\rls\x1b[201~", sent[-1]
+
+        # A dead session has nowhere to send it.
+        session.status = "closed"
+        before = len(sent)
+        pane._on_paste(events.Paste("ignored"))
+        assert len(sent) == before
+        app.sessions.close_all()

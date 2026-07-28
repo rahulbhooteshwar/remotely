@@ -137,6 +137,16 @@ block.
 Copy happens on mouse-up (`events.TextSelected` → `copy_to_clipboard`), not via
 Textual's `ctrl+c` binding, because `ctrl+c` has to reach the remote shell.
 
+Paste needs its **own handler**: Textual turns a bracketed paste into a single
+`events.Paste`, not a run of key presses, so `_on_key` never sees it and
+without `_on_paste` the text is silently dropped. It translates newlines to CR
+(a terminal submits with CR; LF would drop a line without returning) and wraps
+the text in `CSI 200~`/`CSI 201~` **only** when the remote has enabled DECSET
+2004 — `TerminalEmulator.bracketed_paste`. Wrapping unconditionally leaves the
+markers as literal junk in anything that has not asked for them; not wrapping
+when it has costs the protection against a multi-line paste executing itself
+line by line.
+
 ### Subclassing Textual's Tab
 
 `Tab._on_click(self)` takes **no event argument**. Textual walks the MRO and

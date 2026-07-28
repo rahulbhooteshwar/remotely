@@ -188,6 +188,7 @@ The input at the top is the only control surface. It completes as you type.
 | `R` | reconnect a disconnected session (or click **Retry** in the overlay) |
 | mouse wheel | scroll the session |
 | drag | select session text - copied to the clipboard when you release |
+| paste | your terminal's paste shortcut sends the text to the remote |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | previous / next tab |
 | wheel over the tab row | scroll the tabs (or hold the pointer at either edge) |
 | `Ctrl+N` | new host |
