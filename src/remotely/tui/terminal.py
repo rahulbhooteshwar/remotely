@@ -87,6 +87,17 @@ class TerminalPane(Widget, can_focus=True):
         self._announced_close = False
         self._last_status = ""
         self._started = time.monotonic()
+        # pyte reports "default" for any cell the remote never explicitly
+        # coloured, and that resolves to bg=None. Textual does not backfill a
+        # None segment background from the widget's CSS background for
+        # content lines, so leaving it None means no colour code is emitted
+        # at all and the real terminal we are running inside shows its own
+        # default through the gap - not the theme's. Resolving it here is
+        # what makes the theme actually paint the whole pane.
+        pane_styles = session.theme.pane_styles()
+        self._bg_default = pane_styles["background"]
+        self._fg_default = pane_styles["color"]
+        self._blank_style = Style(bgcolor=self._bg_default, color=self._fg_default)
 
     # ------------------------------------------------------------------ setup
 
@@ -222,7 +233,7 @@ class TerminalPane(Widget, can_focus=True):
 
         emulator = session.emulator
         if y >= emulator.rows:
-            return Strip.blank(self.size.width)
+            return Strip.blank(self.size.width, self._blank_style)
 
         cells = emulator.line(y)
         cursor_x, cursor_y = emulator.cursor
@@ -245,7 +256,7 @@ class TerminalPane(Widget, can_focus=True):
             segments.append(Segment("".join(run), (run_style or Style()) + meta))
 
         for x, cell in enumerate(cells):
-            style = _style_for(cell)
+            style = _style_for(cell, self._bg_default, self._fg_default)
             if show_cursor and x == cursor_x:
                 style = style + _REVERSE
             if run_style is not None and style == run_style:
@@ -258,7 +269,9 @@ class TerminalPane(Widget, can_focus=True):
 
         flush(len(cells))
 
-        return Strip(segments, emulator.cols).adjust_cell_length(self.size.width)
+        return Strip(segments, emulator.cols).adjust_cell_length(
+            self.size.width, self._blank_style
+        )
 
     def notice_lines(self) -> list[tuple[str, Style]]:
         """The connecting / failed message, as (text, style) rows."""
@@ -295,12 +308,15 @@ class TerminalPane(Widget, can_focus=True):
         top = max(0, (self.size.height - len(lines)) // 2)
         index = y - top
         if index < 0 or index >= len(lines):
-            return Strip.blank(width)
+            return Strip.blank(width, self._blank_style)
         text, style = lines[index]
         if not text:
-            return Strip.blank(width)
+            return Strip.blank(width, self._blank_style)
         pad = max(0, (width - len(text)) // 2)
-        return Strip([Segment(" " * pad), Segment(text, style)]).adjust_cell_length(width)
+        bg = Style(bgcolor=self._bg_default)
+        return Strip(
+            [Segment(" " * pad, bg), Segment(text, bg + style)]
+        ).adjust_cell_length(width, self._blank_style)
 
 
 #: Keys the terminal never swallows, so the launcher is always reachable.
@@ -318,19 +334,31 @@ _REVERSE = Style(reverse=True)
 _STYLE_CACHE: dict[tuple, Style] = {}
 
 
-def _style_for(cell: Cell) -> Style:
+def _style_for(cell: Cell, bg_default: str, fg_default: str) -> Style:
     """Cached Rich style for a cell.
 
     A full screen is a few thousand cells redrawn many times a second, but only
     a handful of distinct styles, so caching turns most of the work into a dict
-    lookup.
+    lookup. ``bg_default``/``fg_default`` are the theme's colours, used
+    whenever pyte reports a cell as "default" (``cell.bg``/``cell.fg`` is
+    ``None``) - see the comment in ``TerminalPane.__init__`` for why that
+    can't be left unset.
     """
-    key = (cell.fg, cell.bg, cell.bold, cell.italic, cell.underline, cell.reverse)
+    key = (
+        cell.fg,
+        cell.bg,
+        cell.bold,
+        cell.italic,
+        cell.underline,
+        cell.reverse,
+        bg_default,
+        fg_default,
+    )
     style = _STYLE_CACHE.get(key)
     if style is None:
         style = Style(
-            color=cell.fg,
-            bgcolor=cell.bg,
+            color=cell.fg or fg_default,
+            bgcolor=cell.bg or bg_default,
             bold=cell.bold,
             italic=cell.italic,
             underline=cell.underline,

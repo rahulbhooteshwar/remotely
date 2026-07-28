@@ -592,6 +592,43 @@ async def test_rendered_segments_carry_selection_offsets() -> None:
         app.sessions.close_all()
 
 
+async def test_default_coloured_cells_use_the_theme_background() -> None:
+    """A cell pyte reports as "default" must paint the theme, not the host terminal's.
+
+    Regression: cells the remote never explicitly coloured resolved to
+    bg=None, and Textual does not backfill a None segment background from the
+    widget's CSS for content lines - so nothing was emitted for that cell and
+    whatever terminal the app happened to be running inside showed through
+    its own default colour instead of the theme's.
+    """
+    from remotely.tui.terminal import TerminalPane
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        session.status = "connected"
+        # Untouched cells: nothing has been written, so pyte reports "default".
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+        await pilot.pause()
+
+        theme_background = session.theme.pane_styles()["background"]
+        strip = pane.render_line(0)
+        segments = list(strip)
+        assert segments, "nothing rendered"
+        for seg in segments:
+            assert seg.style is not None
+            assert seg.style.bgcolor is not None, "a cell was left with no background at all"
+            assert seg.style.bgcolor.name == theme_background
+
+        app.sessions.close_all()
+
+
 async def test_connecting_uses_the_rich_dots_spinner() -> None:
     from rich.spinner import SPINNERS
 

@@ -72,6 +72,18 @@ Connecting is threaded end to end because none of it may block the UI:
    the rows that changed. Styles are cached — a screen is thousands of cells but
    only a handful of distinct styles.
 
+pyte reports a cell the remote never explicitly coloured as `"default"`, which
+`terminal.py:resolve_color` turns into `None`. Textual does **not** backfill a
+`None` segment background from the widget's CSS for content lines drawn via
+`render_line` — it is only filled in for padding/border rows and the strip's
+own overflow. Leaving `bgcolor=None` therefore emits no colour code at all,
+and whatever terminal Remotely happens to be running inside shows its own
+default background through the gap instead of the theme's. `TerminalPane`
+resolves `None` fg/bg to the theme's colours (via `session.theme.pane_styles()`)
+in `_style_for` and every `Strip.blank`/`adjust_cell_length` call — don't
+reintroduce a bare `Strip.blank(width)` or an un-defaulted `Style()` in that
+file, or the background leak comes back.
+
 ### Password handling
 
 Passwords go **straight into the SSH handshake in-process**. They are never
