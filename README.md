@@ -124,7 +124,7 @@ What happens on that last keystroke:
    an environment variable, never placed on a command line, and no helper
    process ever sees it.
 3. A new tab opens running the session in the built-in terminal emulator,
-   painted with the `prod` theme: red background, red border, `🔴` in the tab.
+   painted with the `prod` theme: red background, red border, and a red tab.
 
 `ctrl+w` returns to the launcher, `ctrl+pageup`/`ctrl+pagedown` cycle tabs.
 Everything else - including `ctrl+c` and `ctrl+d` - goes to the remote shell.
@@ -156,7 +156,7 @@ The input at the top is the only control surface. It completes as you type.
 | `Shift+PageUp` / `Shift+PageDown` | scroll back through session output |
 | `Shift+End` | jump back to the live edge |
 | mouse wheel | scroll the session |
-| drag | select session text, then copy with your terminal's shortcut |
+| drag | select session text - copied to the clipboard when you release |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | previous / next tab |
 | `Ctrl+N` | new host |
 | `Ctrl+E` / `Ctrl+D` | edit / delete selected host |
@@ -241,7 +241,7 @@ background = "#0b1220"
 border     = "#5f87d7"
 
 [tab]
-icon       = "🔵"
+icon       = "🔵"       # shown in the launcher list; tabs use the accent colour
 ascii_icon = "[S]"     # used when the terminal cannot render the icon
 format     = "{icon} {host}"
 ```

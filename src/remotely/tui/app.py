@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from textual import on, work
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -26,7 +27,7 @@ from ..models import Credential, Host
 from .. import settings as settings_module
 from ..sessions import Session, SessionManager
 from ..store import HostStore, StoreError
-from ..themes import ThemeRegistry
+from ..themes import Theme, ThemeRegistry
 from ..transport import TransportError, system_ssh_available
 from ..vault import InvalidPasscode, Vault, VaultError, VaultLocked
 from .screens import (
@@ -52,6 +53,11 @@ class SessionTab(Tab):
     Textual's Tab has no close affordance, and a keyboard-only route is easy to
     miss, so the label ends in a visible x and a click landing on it closes the
     session instead of selecting it.
+
+    The theme shows up as the tab's own colour rather than an emoji: a filled
+    accent-coloured button reads at a glance and, unlike a glyph, cannot be
+    mangled by a terminal that will not render the emoji. The icon still marks
+    hosts in the launcher, where it sits in a text list.
     """
 
     CLOSE_GLYPH = "✕"
@@ -61,22 +67,33 @@ class SessionTab(Tab):
             super().__init__()
             self.tab_id = tab_id
 
-    def __init__(self, title: str, *, id: str) -> None:
+    def __init__(self, title: str, *, theme: Theme, id: str) -> None:
         super().__init__(f"{title}  {self.CLOSE_GLYPH}", id=id)
         self._title = title
+        self.theme_colors = theme
+
+    def on_mount(self) -> None:
+        # Accent on the theme's own terminal background: bright enough to tell
+        # prod from the rest instantly, dark text so the label stays readable.
+        self.styles.background = self.theme_colors.accent
+        self.styles.color = self.theme_colors.pane_styles()["background"]
+        self.styles.text_style = "bold"
 
     def set_title(self, title: str) -> None:
         self._title = title
         self.label = f"{title}  {self.CLOSE_GLYPH}"
 
-    async def _on_click(self, event) -> None:
+    def _on_click(self, event) -> None:
         # The glyph plus its padding occupies the last few cells.
+        #
+        # Never call super() here: Tab._on_click takes no event argument, so
+        # passing one is a TypeError. Textual already walks the MRO and invokes
+        # the base handler itself; prevent_default() breaks that walk, which is
+        # precisely how a hit on the x suppresses "select this tab".
         if self.id and event.x >= max(0, self.size.width - 3):
             event.prevent_default()
             event.stop()
             self.post_message(self.CloseRequested(self.id))
-            return
-        await super()._on_click(event)
 
 
 class CommandBar(Input):
@@ -598,6 +615,28 @@ class RemotelyApp(App[None]):
             except Exception:
                 pass
 
+    @on(events.TextSelected)
+    def _on_text_selected(self, event: events.TextSelected) -> None:
+        """Copy a finished drag-selection straight to the clipboard.
+
+        Textual binds copy to ctrl+c / super+c, but ctrl+c has to reach the
+        remote shell - taking it would break interrupting a command, which
+        matters far more. Copying on release is what a terminal does anyway,
+        and it leaves no keystroke to discover.
+        """
+        if not self._dom_alive():
+            return
+        try:
+            text = self.screen.get_selected_text()
+        except Exception:
+            return
+        if not text or not text.strip():
+            return
+        self.copy_to_clipboard(text)
+        lines = text.count("\n") + 1
+        unit = "line" if lines == 1 else "lines"
+        self._status(f"Copied {lines} {unit} to the clipboard.")
+
     @on(TerminalPane.Closed)
     def _on_pane_closed(self, event: TerminalPane.Closed) -> None:
         session = event.session
@@ -617,7 +656,7 @@ class RemotelyApp(App[None]):
         theme = event.session.theme
         try:
             tab = self._tabs().query_one(f"#{event.session.id}", SessionTab)
-            tab.set_title(f"{theme.icon} {event.title[:24]}")
+            tab.set_title(event.title[:24])
         except Exception:
             pass
 
@@ -693,7 +732,9 @@ class RemotelyApp(App[None]):
         pane.styles.background = styles["background"]
         pane.styles.color = styles["color"]
 
-        self._tabs().add_tab(SessionTab(session.title, id=session.id))
+        self._tabs().add_tab(
+            SessionTab(session.host_name, theme=theme, id=session.id)
+        )
         self._switch_to(session.id)
 
         self._status(f"Connecting to [b]{host.name}[/b]…")

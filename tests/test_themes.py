@@ -89,6 +89,18 @@ def test_bundled_themes_define_distinct_pane_colours(themes: ThemeRegistry) -> N
     assert len(backgrounds) == len(BUNDLED)
 
 
+def test_non_prod_is_dark_olive(themes: ThemeRegistry) -> None:
+    """Non-prod reads as olive/green, distinct from prod's red at a glance."""
+    theme = themes.get("non-prod")
+    for colour in (theme.accent, theme.pane_styles()["background"]):
+        red, green, blue = (int(colour[i : i + 2], 16) for i in (1, 3, 5))
+        assert green > red and green > blue, f"{colour} is not green-dominant"
+
+    # And it must stay a dark surface, not a bright one.
+    background = theme.pane_styles()["background"]
+    assert sum(int(background[i : i + 2], 16) for i in (1, 3, 5)) < 150
+
+
 def test_tab_title_uses_format(themes: ThemeRegistry) -> None:
     assert themes.get("prod").tab_title("web-1") == "🔴 web-1"
 

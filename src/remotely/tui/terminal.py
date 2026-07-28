@@ -98,6 +98,7 @@ class TerminalPane(Widget, can_focus=True):
         self._bg_default = pane_styles["background"]
         self._fg_default = pane_styles["color"]
         self._blank_style = Style(bgcolor=self._bg_default, color=self._fg_default)
+        self._selection_cache: Style | None = None
 
     # ------------------------------------------------------------------ setup
 
@@ -208,6 +209,22 @@ class TerminalPane(Widget, can_focus=True):
 
     # --------------------------------------------------------------- selection
 
+    def _selection_style(self) -> Style:
+        """Highlight for selected cells: the theme's selection background only.
+
+        Deliberately drops the component style's foreground. Textual's default
+        resolves to the same colour as its background (#064273 on #064273), so
+        applying both would paint the selection as an unreadable solid block.
+        Keeping each cell's own foreground is also what a terminal does.
+        """
+        if self._selection_cache is None:
+            try:
+                component = self.screen.get_component_rich_style("screen--selection")
+                self._selection_cache = Style(bgcolor=component.bgcolor)
+            except Exception:
+                self._selection_cache = Style(bgcolor="#264f78")
+        return self._selection_cache
+
     def get_selection(self, selection):
         """Text under a drag-selection, so it can be copied.
 
@@ -240,6 +257,21 @@ class TerminalPane(Widget, can_focus=True):
         # A cursor drawn over scrolled-back history is misleading.
         show_cursor = self.has_focus and cursor_y == y and emulator.at_live_edge
 
+        # Textual paints drag-selection inside Visual.to_strips, which only runs
+        # for widgets rendering via render()/Visual. Painting via render_line
+        # bypasses it entirely, so the screen tracks the selection and
+        # get_selection() returns the right text while nothing on screen ever
+        # changes - indistinguishable from selection being broken. Highlight it
+        # here instead.
+        select_from, select_to = -1, -1
+        selection = self.text_selection
+        if selection is not None:
+            span = selection.get_span(y)
+            if span is not None:
+                select_from, select_to = span
+                if select_to == -1:
+                    select_to = len(cells)
+
         segments: list[Segment] = []
         run: list[str] = []
         run_style: Style | None = None
@@ -257,6 +289,8 @@ class TerminalPane(Widget, can_focus=True):
 
         for x, cell in enumerate(cells):
             style = _style_for(cell, self._bg_default, self._fg_default)
+            if select_from <= x < select_to:
+                style = style + self._selection_style()
             if show_cursor and x == cursor_x:
                 style = style + _REVERSE
             if run_style is not None and style == run_style:

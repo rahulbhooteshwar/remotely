@@ -84,6 +84,34 @@ in `_style_for` and every `Strip.blank`/`adjust_cell_length` call — don't
 reintroduce a bare `Strip.blank(width)` or an un-defaulted `Style()` in that
 file, or the background leak comes back.
 
+The same bypass costs the **selection highlight**. Textual paints a drag
+selection inside `Visual.to_strips`, which only runs for widgets rendering via
+`render()`/Visual. Painting via `render_line` skips it, so `screen.selections`
+and `get_selection()` are correct while not one cell on screen changes —
+indistinguishable from selection being broken, and the reason it was reported
+broken twice. `TerminalPane.render_line` applies the highlight itself from
+`Selection.get_span(y)`. It deliberately takes only the *background* of
+`screen--selection`: Textual's default resolves foreground and background to
+the same colour (`#064273 on #064273`), so applying both paints an unreadable
+block.
+
+Copy happens on mouse-up (`events.TextSelected` → `copy_to_clipboard`), not via
+Textual's `ctrl+c` binding, because `ctrl+c` has to reach the remote shell.
+
+### Subclassing Textual's Tab
+
+`Tab._on_click(self)` takes **no event argument**. Textual walks the MRO and
+invokes the base handler itself, so `SessionTab._on_click` must never call
+`super()._on_click(event)` — that raises `TypeError: takes 1 positional
+argument but 2 were given` on every tab click. `event.prevent_default()` breaks
+the MRO walk, which is how a hit on the ✕ suppresses "select this tab".
+
+### Theme icons vs. tab colour
+
+The theme's emoji marks hosts in the **launcher list only**. Tabs convey the
+theme through their own colour (accent background, dark text) — a glyph there
+is at the mercy of the terminal's emoji support, a colour is not.
+
 ### Password handling
 
 Passwords go **straight into the SSH handshake in-process**. They are never

@@ -210,10 +210,10 @@ async def test_connecting_opens_a_themed_tab_and_renders_the_remote() -> None:
             screen = "\n".join(session.emulator.display())
             assert "Welcome to the test server" in screen, screen
 
-            # The tab exists and carries the theme marker.
+            # The tab exists and carries the theme as colour, not an emoji.
             tab_ids = [t.id for t in app.query(Tabs).first().query("Tab")]
             assert session.id in tab_ids
-            assert "🔴" in session.title
+            assert "🔴" not in str(app.query_one(f"Tab#{session.id}").label)
 
             # The pane renders real cells, not a blank strip.
             strip = pane.render_line(0)
@@ -626,6 +626,179 @@ async def test_default_coloured_cells_use_the_theme_background() -> None:
             assert seg.style.bgcolor is not None, "a cell was left with no background at all"
             assert seg.style.bgcolor.name == theme_background
 
+        app.sessions.close_all()
+
+
+async def test_clicking_a_tab_does_not_crash() -> None:
+    """Regression: SessionTab._on_click called super() with the event.
+
+    Tab._on_click takes no event argument, so every click on a session tab
+    raised "takes 1 positional argument but 2 were given". Textual walks the
+    MRO and invokes the base handler itself, so there is nothing to delegate.
+    """
+    from remotely.tui.app import SessionTab
+    from textual.events import Click
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Not what this test is about: go straight to closing.
+        app.settings.confirm_close_tab = False
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        tab = app.query_one(f"Tab#{session.id}", SessionTab)
+
+        def click(x: int) -> Click:
+            return Click(widget=tab, x=x, y=0, delta_x=0, delta_y=0, button=1,
+                         shift=False, meta=False, ctrl=False,
+                         screen_x=x, screen_y=0, style=None)
+
+        # A click on the label selects; neither path may raise.
+        await tab._on_message(click(1))
+        await pilot.pause()
+        assert app.sessions.get(session.id) is not None, "label click closed the session"
+
+        # A click on the trailing x asks to close it.
+        await tab._on_message(click(tab.size.width - 1))
+        for _ in range(30):
+            await pilot.pause()
+        assert app.sessions.get(session.id) is None, "clicking the x did not close the tab"
+        app.sessions.close_all()
+
+
+async def test_selection_is_actually_painted() -> None:
+    """Regression: the selection was tracked but never drawn.
+
+    Textual applies the selection highlight inside Visual.to_strips, which only
+    runs for widgets rendering through render()/Visual. TerminalPane paints via
+    render_line and so bypassed it: screen.selections was correct and
+    get_selection() returned the right text, but not one cell on screen ever
+    changed - indistinguishable from selection being broken.
+    """
+    from textual.events import MouseMove
+
+    from remotely.tui.terminal import TerminalPane
+
+    app = build_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        session.status = "connected"
+        session.emulator.feed(b"HELLO-SELECT-ME world\r\n")
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+        await pilot.pause()
+
+        def backgrounds():
+            return [str(seg.style.bgcolor) for seg in pane.render_line(0)]
+
+        plain = backgrounds()
+        assert len(set(plain)) == 1, "unselected row should be one uniform background"
+
+        origin = pane.region.offset
+        await pilot.mouse_down(pane, offset=(0, 0))
+        await pilot.pause()
+        # Drive the drag the way the app forwards a real mouse move.
+        app.screen._forward_event(
+            MouseMove(widget=None, x=origin.x + 12, y=origin.y, delta_x=12, delta_y=0,
+                      button=1, shift=False, meta=False, ctrl=False,
+                      screen_x=origin.x + 12, screen_y=origin.y)
+        )
+        await pilot.pause()
+        await pilot.pause()
+
+        selection = pane.text_selection
+        assert selection is not None, "no selection was registered"
+        span = selection.get_span(0)
+        assert span is not None
+
+        during = backgrounds()
+        assert len(set(during)) > 1, "selection produced no visible highlight"
+
+        # The highlight must stop where the selection stops, not flood the row.
+        highlight = pane._selection_style().bgcolor
+        painted = sum(
+            len(seg.text) for seg in pane.render_line(0) if seg.style.bgcolor == highlight
+        )
+        assert painted == span[1] - span[0], "highlight width does not match the selection"
+
+        # And the selected text is readable: fg must not equal the highlight bg.
+        for seg in pane.render_line(0):
+            if seg.style.bgcolor == highlight:
+                assert seg.style.color != seg.style.bgcolor, "selected text is invisible"
+        app.sessions.close_all()
+
+
+async def test_finished_selection_is_copied_to_the_clipboard() -> None:
+    """ctrl+c belongs to the remote shell, so copy happens on release."""
+    from textual.events import MouseMove
+
+    from remotely.tui.terminal import TerminalPane
+
+    app = build_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        session.status = "connected"
+        session.emulator.feed(b"COPY-THIS-PLEASE\r\n")
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+        await pilot.pause()
+
+        origin = pane.region.offset
+        await pilot.mouse_down(pane, offset=(0, 0))
+        await pilot.pause()
+        app.screen._forward_event(
+            MouseMove(widget=None, x=origin.x + 9, y=origin.y, delta_x=9, delta_y=0,
+                      button=1, shift=False, meta=False, ctrl=False,
+                      screen_x=origin.x + 9, screen_y=origin.y)
+        )
+        await pilot.pause()
+        await pilot.mouse_up(pane, offset=(9, 0))
+        for _ in range(20):
+            await pilot.pause()
+
+        assert "COPY-THIS" in (app._clipboard or ""), "selection was not copied"
+        app.sessions.close_all()
+
+
+async def test_tabs_carry_theme_colour_instead_of_an_emoji() -> None:
+    """The theme reads as the tab's colour; the emoji stays in the launcher."""
+    from remotely.tui.app import SessionTab
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        await pilot.pause()
+        tab = app.query_one(f"Tab#{session.id}", SessionTab)
+
+        label = str(tab.label)
+        assert "prod-web" in label
+        assert SessionTab.CLOSE_GLYPH in label
+        theme = app.themes.get("prod")
+        assert theme.icon not in label, "tab still shows the theme emoji"
+
+        # The theme is conveyed by colour instead.
+        assert tab.styles.background.hex.lower().startswith(theme.accent.lower()[:4])
+        assert tab.styles.color != tab.styles.background
         app.sessions.close_all()
 
 

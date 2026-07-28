@@ -560,7 +560,7 @@ class HelpScreen(ModalScreen[None]):
   shift+pagedown   scroll forward
   shift+end        jump back to the live edge
   mouse wheel      scroll
-  drag             select text, then copy with your terminal's shortcut
+  drag             select text - copied to the clipboard on release
   Every other key goes to the remote shell, including ctrl+c and ctrl+d.
 
 [b]Commands[/b]

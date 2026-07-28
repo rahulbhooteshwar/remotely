@@ -1,17 +1,17 @@
 name = "non-prod"
 label = "Non-Production"
-description = "Amber. Staging, QA, and anything you can safely break."
+description = "Dark olive. Staging, QA, and anything you can safely break."
 
 [colors]
-accent = "#e5a03c"
-background = "#2a2109"
-foreground = "#ffeccc"
-dim = "#a08a5a"
+accent = "#a3be5c"
+background = "#1e2410"
+foreground = "#e2ecc8"
+dim = "#8a9663"
 
 [terminal]
-background = "#1a1505"
-foreground = "#ffeccc"
-border = "#e5a03c"
+background = "#141a08"
+foreground = "#e2ecc8"
+border = "#a3be5c"
 
 [tab]
 icon = "🟡"
@@ -19,5 +19,5 @@ ascii_icon = "[~]"
 format = "{icon} {host}"
 
 [remote]
-prompt_color = "1;30;43"
+prompt_color = "1;30;42"
 banner = "NON-PROD"
