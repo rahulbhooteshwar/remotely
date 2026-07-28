@@ -15,9 +15,9 @@ CredentialKind = Literal["password", "key"]
 
 UNGROUPED = "Ungrouped"
 
-#: SSH ``-o`` options applied when a host does not define its own. Mirrors the
-#: intent of the original Connectify defaults but stays auth-agnostic because
-#: the vault, not the host, decides how we authenticate.
+#: SSH ``-o`` options applied when a host does not define its own. Deliberately
+#: auth-agnostic: the credential decides how we authenticate, not the host, so
+#: these say nothing about which auth methods to prefer.
 DEFAULT_SSH_OPTIONS: list[str] = [
     "StrictHostKeyChecking=accept-new",
     "ServerAliveInterval=30",
@@ -44,8 +44,9 @@ class Host:
     #: Name of the vault credential to authenticate with. ``None`` means rely on
     #: the ssh agent / default key discovery.
     credential: str | None = None
-    #: ``None`` means "not configured, use defaults". An empty list explicitly
-    #: means "no extra options" - the same distinction Connectify draws.
+    #: ``None`` means "not configured, use defaults"; an empty list explicitly
+    #: means "no extra options". The two are distinct and both persist, so a
+    #: host that opts out of the defaults keeps doing so.
     ssh_options: list[str] | None = None
     #: Shell out to the host's ``ssh`` instead of the built-in client. Opt-in,
     #: for setups the bundled client cannot express (ProxyCommand, GSSAPI).

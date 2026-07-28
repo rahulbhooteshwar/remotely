@@ -21,18 +21,22 @@ remotely
 
 ## Why it exists
 
-It succeeds [Connectify](https://github.com/rahulbhooteshwar/connectify-iterm2),
-which did the same job but was welded to macOS.
+SSH connection managers usually make you pick a compromise. GUI ones tie you to
+a particular terminal emulator and a particular OS. Shell-script wrappers hand
+your password to `sshpass`, where it lands in a temp file or in `ps` output.
+Anything written in a scripting language expects you to have that language, a
+package manager, and a multiplexer already installed.
 
-| | Connectify | Remotely |
-|---|---|---|
-| Tabs | iTerm2 via AppleScript | built-in terminal emulator |
-| SSH | system `ssh` + `sshpass` | built-in SSH client |
-| Themes | iTerm2 profiles | own `.toml` theme files |
-| Secrets | macOS Keychain | encrypted vault, one passcode |
-| UI | web UI on a background server | terminal UI, no server |
-| Install | PyInstaller bundle | single binary |
-| Platform | macOS only | macOS and Linux |
+Remotely takes none of those trades:
+
+| | How |
+|---|---|
+| **Nothing to install** | Ships its own SSH client, terminal emulator and interpreter in one binary |
+| **Passwords stay in memory** | Fed straight into the SSH handshake - never on disk, in an env var, or on a command line |
+| **Prod looks like prod** | Per-host themes colour the whole session, so a red pane is never staging |
+| **One input for everything** | Search, commands, tags and groups all come from the same bar |
+| **Credentials are shared, not copied** | One named credential backs many hosts; rotate it once |
+| **Runs where you work** | macOS and Linux, in any terminal, over SSH, in a container |
 
 ## Requirements
 

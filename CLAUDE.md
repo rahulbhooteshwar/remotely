@@ -9,9 +9,6 @@ zero runtime dependencies** — no Python, no uv, no tmux, no OpenSSH, no sshpas
 It carries its own SSH client (paramiko) and its own terminal emulator (pyte),
 and PyInstaller bundles the interpreter.
 
-It succeeds [Connectify](https://github.com/rahulbhooteshwar/connectify-iterm2)
-and shares no code with it.
-
 **The zero-dependency property is the product.** Before adding anything that
 shells out to an external binary, or a dependency that needs a compiler or a
 system library at runtime, check it survives `make binary` and the hermetic
