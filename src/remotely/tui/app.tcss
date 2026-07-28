@@ -106,6 +106,15 @@ Screen {
     height: 1;
 }
 
+/* The second row is supporting detail. A terminal has one font size, so the
+   step down in importance has to come from colour and weight rather than
+   points: dim, low-contrast, and indented under the name it belongs to. */
+.tile-tags {
+    color: #55617a;
+    text-style: dim;
+    padding-left: 2;
+}
+
 /* Fixed width so the icons line up down the list; each is its own widget, so
    the clickable area and the glyph can never drift apart. */
 .tile-actions {

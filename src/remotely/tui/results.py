@@ -94,7 +94,10 @@ class HostTile(Vertical):
         target = f"{host.username}@{host.hostname}:{host.port}" if host.username else (
             f"{host.hostname}:{host.port}"
         )
-        tags = "  ".join(f"@{tag}" for tag in host.tags) or "[dim]no tags[/dim]"
+        # A terminal cannot render a smaller font - every cell is one size, and
+        # the size belongs to the window. Tags recede by colour and weight
+        # instead, which is the hierarchy a smaller font would have bought.
+        tags = "  ".join(f"@{tag}" for tag in host.tags) or "no tags"
 
         with Horizontal(classes="tile-body"):
             with Vertical(classes="tile-text"):
@@ -102,7 +105,7 @@ class HostTile(Vertical):
                     f"[b]{host.name}[/b]{live}   [dim]{target}[/dim]",
                     classes="tile-line",
                 )
-                yield Static(f"[dim]{tags}[/dim]", classes="tile-line")
+                yield Static(tags, classes="tile-line tile-tags")
             with Horizontal(classes="tile-actions"):
                 for action, glyph, tooltip in ACTIONS:
                     yield IconButton(host.name, action, glyph, tooltip)
