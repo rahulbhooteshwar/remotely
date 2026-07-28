@@ -1130,6 +1130,42 @@ async def test_clean_exit_is_not_reported_as_a_failure() -> None:
             app.sessions.close_all()
 
 
+@pytest.mark.parametrize("size", [(120, 40), (84, 24), (72, 18), (60, 14), (50, 12)])
+async def test_form_buttons_stay_on_screen_at_any_terminal_size(size) -> None:
+    """Save/Cancel must never be clipped, however few rows or columns there are.
+
+    Regression, reported with a large terminal font - which costs both rows
+    and columns. Two independent causes: .form-scroll had a fixed 24-row cap
+    taller than the whole dialog on a short terminal, pushing the buttons off
+    the bottom; and .modal-wide was a fixed 84 columns, pushing the
+    right-aligned Save clean off the right edge on a narrow one.
+    """
+    from remotely.tui.screens import HostFormScreen
+    from textual.widgets import Button
+
+    width, height = size
+    app = build_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app.push_screen(HostFormScreen(None, themes=app.themes.names()))
+        for _ in range(12):
+            await pilot.pause()
+
+        buttons = {str(b.label): b for b in app.screen.query(Button)}
+        assert {"Save", "Cancel"} <= set(buttons), f"form lost its buttons: {buttons}"
+
+        for label, button in buttons.items():
+            region = button.region
+            assert region.y >= 0, f"{label} is above the screen at {size}"
+            assert region.y + region.height <= height, f"{label} is below the screen at {size}"
+            assert region.x >= 0, f"{label} is off the left edge at {size}"
+            assert region.x + region.width <= width, f"{label} is off the right edge at {size}"
+
+        # The fields must still be reachable, not squeezed to nothing.
+        scroll = app.screen.query_one(".form-scroll")
+        assert scroll.region.height >= 1, "no room left for the form fields"
+
+
 async def test_connecting_uses_the_rich_dots_spinner() -> None:
     from rich.spinner import SPINNERS
 

@@ -122,12 +122,17 @@ ModalScreen {
 
 .modal-narrow {
     width: 60;
+    max-width: 100%;
     height: auto;
     max-height: 80%;
 }
 
+/* max-width matters as much as the height cap: a large font also means
+   fewer columns, and a fixed 84 wide pushes the right-aligned Save button
+   clean off the screen edge. */
 .modal-wide {
     width: 84;
+    max-width: 100%;
     height: auto;
     max-height: 90%;
 }
@@ -167,9 +172,14 @@ ModalScreen {
     min-width: 12;
 }
 
+/* Takes whatever the dialog has left over after the title and the buttons,
+   rather than a fixed number of rows. A hard cap (it was 24) can be taller
+   than the entire dialog on a short terminal - which is exactly what a large
+   font gives you - so the fields pushed the buttons off the bottom and Save
+   became unreachable. Flexing keeps them on screen at any size. */
 .form-scroll {
-    height: auto;
-    max-height: 24;
+    height: 1fr;
+    min-height: 1;
     scrollbar-size-vertical: 1;
 }
 

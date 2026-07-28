@@ -123,6 +123,24 @@ would silently kill the close-tab binding. Deliberate call: keep the protocol,
 document paste as the route for emoji. Don't "fix" this by disabling Kitty
 without also rebinding close-tab.
 
+### Modal sizing
+
+Dialogs must survive a small terminal — a large terminal font costs both rows
+and columns, and that is how users hit this. Two rules in `app.tcss`:
+
+- `.form-scroll` is `height: 1fr`, never a fixed row count. A hard cap can
+  exceed the whole dialog's height on a short terminal, which pushes the
+  buttons off the bottom and makes Save unreachable.
+- `.modal-wide` / `.modal-narrow` carry `max-width: 100%` alongside their fixed
+  width. Without it the dialog overflows a narrow terminal and the
+  right-aligned Save button falls off the right edge.
+
+The two failure modes are independent and both are covered by
+`test_form_buttons_stay_on_screen_at_any_terminal_size`, which is
+parametrised over sizes down to 50x12. Verify layout changes by rendering
+(`screen._compositor.render_strips()`), not by widget geometry alone — the
+width bug was invisible in a geometry-only probe run at 100 columns.
+
 ### Disconnect overlay and retry
 
 A dead session (`error` or `closed`) draws a centred panel over the pane —
