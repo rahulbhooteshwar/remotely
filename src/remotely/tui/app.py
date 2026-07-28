@@ -45,6 +45,39 @@ from .terminal import TerminalPane
 LAUNCHER_TAB = "launcher"
 
 
+class SessionTab(Tab):
+    """A session tab carrying its own close control.
+
+    Textual's Tab has no close affordance, and a keyboard-only route is easy to
+    miss, so the label ends in a visible x and a click landing on it closes the
+    session instead of selecting it.
+    """
+
+    CLOSE_GLYPH = "✕"
+
+    class CloseRequested(Message):
+        def __init__(self, tab_id: str) -> None:
+            super().__init__()
+            self.tab_id = tab_id
+
+    def __init__(self, title: str, *, id: str) -> None:
+        super().__init__(f"{title}  {self.CLOSE_GLYPH}", id=id)
+        self._title = title
+
+    def set_title(self, title: str) -> None:
+        self._title = title
+        self.label = f"{title}  {self.CLOSE_GLYPH}"
+
+    async def _on_click(self, event) -> None:
+        # The glyph plus its padding occupies the last few cells.
+        if self.id and event.x >= max(0, self.size.width - 3):
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.CloseRequested(self.id))
+            return
+        await super()._on_click(event)
+
+
 class CommandBar(Input):
     """The one input. Steals navigation keys so the list can be driven from here."""
 
@@ -94,6 +127,7 @@ class RemotelyApp(App[None]):
         Binding("ctrl+q", "quit", "Quit", priority=True),
         Binding("f1", "help", "Help", priority=True),
         Binding("ctrl+w", "show_launcher", "Launcher", priority=True),
+        Binding("ctrl+shift+w", "close_tab", "Close tab", priority=True),
         Binding("ctrl+pagedown", "next_tab", "Next tab", priority=True, show=False),
         Binding("ctrl+pageup", "prev_tab", "Prev tab", priority=True, show=False),
         Binding("ctrl+n", "new_host", "New", priority=True),
@@ -465,6 +499,7 @@ class RemotelyApp(App[None]):
             "edit": lambda: self._edit_host(argument),
             "delete": lambda: self._delete_host(argument),
             "sessions": self.action_sessions,
+            "close": lambda: self._close_by_name(argument),
             "themes": self.action_themes,
             "vault": self.action_vault,
             "lock": self._lock_vault,
@@ -575,13 +610,25 @@ class RemotelyApp(App[None]):
     @on(TerminalPane.TitleChanged)
     def _on_pane_title(self, event: TerminalPane.TitleChanged) -> None:
         # Remote-set titles are useful but must not lose the theme marker that
-        # tells production apart at a glance.
+        # tells production apart at a glance, nor the close control.
         theme = event.session.theme
-        label = f"{theme.icon} {event.title[:28]}"
         try:
-            self._tabs().query_one(f"#{event.session.id}", Tab).label = label
+            tab = self._tabs().query_one(f"#{event.session.id}", SessionTab)
+            tab.set_title(f"{theme.icon} {event.title[:24]}")
         except Exception:
             pass
+
+    @on(SessionTab.CloseRequested)
+    def _on_tab_close_clicked(self, event: SessionTab.CloseRequested) -> None:
+        self._close_session(event.tab_id)
+
+    def action_close_tab(self) -> None:
+        """Close the session on the current tab."""
+        current = self._tabs().active
+        if not current or current == LAUNCHER_TAB:
+            self._status("No session tab is selected.")
+            return
+        self._close_session(current)
 
     # --------------------------------------------------------------- connecting
 
@@ -620,7 +667,7 @@ class RemotelyApp(App[None]):
         pane.styles.background = styles["background"]
         pane.styles.color = styles["color"]
 
-        self._tabs().add_tab(Tab(session.title, id=session.id))
+        self._tabs().add_tab(SessionTab(session.title, id=session.id))
         self._switch_to(session.id)
 
         self._status(f"Connecting to [b]{host.name}[/b]…")
@@ -641,8 +688,13 @@ class RemotelyApp(App[None]):
             await asyncio.sleep(0.1)
 
         if session.status == "error":
-            self._status(f"[b]{session.host_name}[/b]: {session.error}", error=True)
-            self.action_show_launcher()
+            # Stay on the failed tab: the pane shows the error and what to do
+            # about it. Bouncing back to the launcher hides both.
+            self._status(
+                f"[b]{session.host_name}[/b]: {session.error}  "
+                f"[dim](ctrl+shift+w closes this tab)[/dim]",
+                error=True,
+            )
         elif session.status == "connected":
             notes = f"  [dim]{' '.join(session.notes)}[/dim]" if session.notes else ""
             self._status(
@@ -651,10 +703,24 @@ class RemotelyApp(App[None]):
         self._refresh_banner()
         self._refresh_results()
 
+    def _close_by_name(self, name: str) -> None:
+        """/close with no argument closes the current tab."""
+        if not name:
+            self.action_close_tab()
+            return
+        matches = self.sessions.for_host(name)
+        if not matches:
+            self._status(f"No open session for {name!r}.", error=True)
+            return
+        for session in matches:
+            self._close_session(session.id)
+        self._status(f"Closed {len(matches)} session(s) for [b]{name}[/b].")
+
     def _close_session(self, session_id: str) -> None:
         session = self.sessions.get(session_id)
         if session is None:
             return
+        host_name = session.host_name
         session.close()
         self.sessions.remove(session_id)
         try:
@@ -665,9 +731,16 @@ class RemotelyApp(App[None]):
             self.query_one(f"#{session_id}", TerminalPane).remove()
         except Exception:
             pass
-        self.action_show_launcher()
+        # Land on whatever tab is left rather than always the launcher, so
+        # closing one of several sessions does not eject you from the others.
+        remaining = self.sessions.list()
+        if remaining:
+            self._switch_to(remaining[-1].id)
+        else:
+            self.action_show_launcher()
         self._refresh_banner()
         self._refresh_results()
+        self._status(f"Closed session to [b]{host_name}[/b].")
 
     # ------------------------------------------------------------------ actions
 

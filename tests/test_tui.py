@@ -366,3 +366,175 @@ async def test_quitting_mid_connect_does_not_crash_the_watcher() -> None:
 
     assert not app._dom_alive()
     app.sessions.close_all()
+
+
+# ------------------------------------------------------- usability regressions
+
+
+async def test_pane_fits_between_the_tabs_and_the_footer() -> None:
+    """The pane used to overrun the screen, hiding the prompt and status line.
+
+    Regression: it was 29 rows starting at row 3 on a 30-row screen, so the
+    last terminal lines rendered under the footer and #status fell off the
+    bottom entirely.
+    """
+    from remotely.tui.terminal import TerminalPane
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+        for _ in range(30):
+            await pilot.pause()
+
+        footer = app.query_one("Footer")
+        status = app.query_one("#status")
+        screen_height = app.screen.size.height
+
+        pane_bottom = pane.region.y + pane.region.height
+        assert pane_bottom <= footer.region.y, "pane overlaps the footer"
+        assert status.region.y < screen_height, "status line is off-screen"
+        assert pane.region.y + pane.region.height <= screen_height
+        # The remote is told exactly the rows we can draw.
+        assert session.emulator.rows == pane.size.height
+        app.sessions.close_all()
+
+
+async def test_failed_session_shows_the_reason_in_the_pane() -> None:
+    """A failure used to leave a blank pane with nothing to act on."""
+    from remotely.models import Credential
+    from remotely.tui.terminal import TerminalPane
+
+    from .conftest import PASSCODE
+
+    app = build_app()
+    app.store.add(
+        make_host("dead", hostname="127.0.0.1", port=9, auth_mode="credential", credential="pw")
+    )
+    app.vault.initialise(PASSCODE)
+    app.vault.put(Credential(name="pw", kind="password", password="x"))
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("dead")
+        for _ in range(400):
+            await pilot.pause()
+            s = app.sessions.list()
+            if s and s[0].status == "error":
+                break
+        session = app.sessions.list()[0]
+        assert session.status == "error"
+
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+        text = " ".join(line for line, _ in pane.notice_lines())
+        assert "Could not connect to dead" in text
+        assert session.error and session.error.split(".")[0] in text
+        # And something the user can actually do about it.
+        assert session.failure_hints(), "no actionable hint for a refused connection"
+        app.sessions.close_all()
+
+
+async def test_connecting_state_is_visible_not_blank() -> None:
+    from remotely.tui.terminal import TerminalPane
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+        if session.status == "connecting":
+            text = " ".join(line for line, _ in pane.notice_lines())
+            assert "Connecting to prod-web" in text
+        app.sessions.close_all()
+
+
+async def test_terminal_output_can_be_selected_for_copying() -> None:
+    from textual.selection import Selection
+    from textual.geometry import Offset
+    from remotely.tui.terminal import TerminalPane
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        session.emulator.feed(b"copy-me-please\r\n")
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+        await pilot.pause()
+
+        assert pane.ALLOW_SELECT is True
+        result = pane.get_selection(Selection(Offset(0, 0), Offset(14, 0)))
+        assert result is not None, "get_selection returned nothing"
+        text, ending = result
+        assert "copy-me" in text
+        app.sessions.close_all()
+
+
+async def test_closing_one_tab_keeps_the_others() -> None:
+    from remotely.tui.app import SessionTab
+    from textual.widgets import Tabs
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        for host in ("prod-web", "prod-db"):
+            app._connect(host)
+            for _ in range(200):
+                await pilot.pause()
+                if app.sessions.for_host(host):
+                    break
+        assert len(app.sessions.list()) == 2
+
+        first = app.sessions.list()[0]
+        app._close_session(first.id)
+        await pilot.pause()
+
+        remaining = app.sessions.list()
+        assert len(remaining) == 1, "closing one tab should not close the others"
+        tab_ids = [t.id for t in app.query(Tabs).first().query("Tab")]
+        assert first.id not in tab_ids
+        assert remaining[0].id in tab_ids
+        # And we land on the surviving session, not ejected to the launcher.
+        assert app.query_one("#content").current == remaining[0].id
+        app.sessions.close_all()
+
+
+async def test_tab_carries_a_close_control() -> None:
+    from remotely.tui.app import SessionTab
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        tab = app.query_one(f"Tab#{session.id}", SessionTab)
+        assert SessionTab.CLOSE_GLYPH in str(tab.label)
+        app.sessions.close_all()
+
+
+async def test_close_command_reports_unknown_host() -> None:
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._run_command("close", "nope")
+        await pilot.pause()
+        assert app.query_one("#status").has_class("error")

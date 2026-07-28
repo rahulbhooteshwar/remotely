@@ -55,6 +55,39 @@ class Session:
     def is_live(self) -> bool:
         return self.status in ("connecting", "connected")
 
+    @property
+    def target_hint(self) -> str:
+        """``user@host:port`` for display, empty if the transport has no spec."""
+        spec = getattr(self.transport, "spec", None)
+        if spec is None:
+            return ""
+        return f"{spec.target}:{spec.port}"
+
+    def failure_hints(self) -> list[str]:
+        """Actionable next steps for whatever went wrong.
+
+        An error string alone rarely says what to change; these map the common
+        failures onto the screen the user needs to open.
+        """
+        error = (self.error or "").lower()
+        if "authentication" in error:
+            return ["Check the credential's username and password in the vault (ctrl+k)."]
+        if "no password" in error or "no key path" in error:
+            return ["This credential is incomplete. Fix it in the vault (ctrl+k)."]
+        if "timed out" in error:
+            return ["Is the host reachable? Check the address, port, VPN and firewall."]
+        if "refused" in error or "could not reach" in error or "unable to connect" in error:
+            return ["Nothing is listening there. Check the port, that sshd is",
+                    "running, and any VPN or firewall in between."]
+        if "could not be resolved" in error:
+            return ["The hostname did not resolve. Check the spelling and DNS."]
+        if "host key" in error:
+            return ["The server's key changed. If that is expected, remove its",
+                    "entry from ~/.remotely/known_hosts."]
+        if "not installed" in error:
+            return ["Turn off 'use system ssh' for this host to use the built-in client."]
+        return []
+
     # ------------------------------------------------------------------ bytes
 
     def push(self, data: bytes) -> None:

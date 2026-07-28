@@ -209,3 +209,52 @@ def test_unknown_key_returns_none() -> None:
 
 def test_every_mapped_sequence_is_bytes() -> None:
     assert all(isinstance(v, bytes) and v for v in KEY_SEQUENCES.values())
+
+
+# -------------------------------------------------------------------- scrollback
+
+
+def test_scroll_up_reveals_earlier_output(term: TerminalEmulator) -> None:
+    for i in range(60):
+        term.feed(f"line{i}\r\n".encode())
+    assert "line59" in "\n".join(term.display())
+    assert term.at_live_edge
+
+    assert term.scroll_up(2) is True
+    assert not term.at_live_edge
+    assert term.scrollback_offset > 0
+
+
+def test_scroll_down_returns_towards_live(term: TerminalEmulator) -> None:
+    for i in range(60):
+        term.feed(f"line{i}\r\n".encode())
+    term.scroll_up(3)
+    assert term.scroll_down(3) is True
+
+
+def test_scroll_to_live_goes_all_the_way_back(term: TerminalEmulator) -> None:
+    for i in range(200):
+        term.feed(f"line{i}\r\n".encode())
+    term.scroll_up(10)
+    assert not term.at_live_edge
+    term.scroll_to_live()
+    assert term.at_live_edge
+    assert "line199" in "\n".join(term.display())
+
+
+def test_scrolling_with_no_history_is_a_no_op(term: TerminalEmulator) -> None:
+    """Must not raise on a fresh screen with nothing to scroll to."""
+    term.feed(b"hello")
+    term.scroll_up(5)
+    term.scroll_down(5)
+    term.scroll_to_live()
+    assert term.at_live_edge
+
+
+def test_scroll_to_live_terminates(term: TerminalEmulator) -> None:
+    """Guards against the loop spinning when paging cannot advance."""
+    for i in range(500):
+        term.feed(f"line{i}\r\n".encode())
+    term.scroll_up(50)
+    term.scroll_to_live()
+    assert term.at_live_edge

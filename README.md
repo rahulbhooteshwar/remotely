@@ -133,6 +133,11 @@ The input at the top is the only control surface. It completes as you type.
 | `Enter` | connect to the selected host |
 | `Tab` | accept completion |
 | `Ctrl+W` | back to the launcher from a session |
+| `Ctrl+Shift+W` | close the current tab (or click the `✕` on the tab) |
+| `Shift+PageUp` / `Shift+PageDown` | scroll back through session output |
+| `Shift+End` | jump back to the live edge |
+| mouse wheel | scroll the session |
+| drag | select session text, then copy with your terminal's shortcut |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | previous / next tab |
 | `Ctrl+N` | new host |
 | `Ctrl+E` / `Ctrl+D` | edit / delete selected host |
@@ -150,6 +155,7 @@ The input at the top is the only control surface. It completes as you type.
 /edit <host>      edit a host              /lock            lock the vault
 /delete <host>    delete a host            /export <path>   export hosts
 /sessions         list open sessions       /import <path>   import hosts
+/close [host]     close a tab
 /help  /quit
 ```
 

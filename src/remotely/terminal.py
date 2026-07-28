@@ -16,6 +16,9 @@ import pyte
 DEFAULT_COLS = 80
 DEFAULT_ROWS = 24
 SCROLLBACK = 5000
+#: Fraction of a screen that one paging step moves. pyte's default of 0.5 makes
+#: a single wheel notch jump half the view; this makes it feel like scrolling.
+SCROLL_RATIO = 0.125
 
 #: pyte reports the eight base colours by name; everything else arrives as a
 #: hex string or an xterm index we can pass through.
@@ -79,7 +82,9 @@ class TerminalEmulator:
     def __init__(self, cols: int = DEFAULT_COLS, rows: int = DEFAULT_ROWS) -> None:
         self.cols = max(cols, 2)
         self.rows = max(rows, 2)
-        self.screen = pyte.HistoryScreen(self.cols, self.rows, history=SCROLLBACK)
+        self.screen = pyte.HistoryScreen(
+            self.cols, self.rows, history=SCROLLBACK, ratio=SCROLL_RATIO
+        )
         self.stream = pyte.ByteStream(self.screen)
         self._title = ""
 
@@ -89,6 +94,47 @@ class TerminalEmulator:
         """Push transport output into the emulator."""
         if data:
             self.stream.feed(data)
+
+    # -------------------------------------------------------------- scrollback
+
+    def scroll_up(self, steps: int = 1) -> bool:
+        """Move back through history. Returns whether anything moved."""
+        before = self.scrollback_offset
+        for _ in range(max(1, steps)):
+            try:
+                self.screen.prev_page()
+            except Exception:
+                break
+        return self.scrollback_offset != before
+
+    def scroll_down(self, steps: int = 1) -> bool:
+        before = self.scrollback_offset
+        for _ in range(max(1, steps)):
+            try:
+                self.screen.next_page()
+            except Exception:
+                break
+        return self.scrollback_offset != before
+
+    def scroll_to_live(self) -> None:
+        """Jump back to the bottom, where new output lands."""
+        guard = 0
+        while self.scrollback_offset > 0 and guard < 1000:
+            if not self.scroll_down(1):
+                break
+            guard += 1
+
+    @property
+    def scrollback_offset(self) -> int:
+        """How far back from live we are, in pyte's paging units."""
+        history = getattr(self.screen, "history", None)
+        if history is None:
+            return 0
+        return max(0, history.size - history.position)
+
+    @property
+    def at_live_edge(self) -> bool:
+        return self.scrollback_offset == 0
 
     def resize(self, cols: int, rows: int) -> None:
         cols = max(int(cols), 2)

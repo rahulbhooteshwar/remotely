@@ -282,6 +282,10 @@ class ParamikoTransport:
             return TransportError("Host could not be resolved.")
         if isinstance(exc, ConnectionRefusedError):
             return TransportError("Connection refused.")
+        # paramiko reports an unreachable host as NoValidConnectionsError, whose
+        # str() carries a distracting "[Errno None]" prefix.
+        if isinstance(exc, paramiko.ssh_exception.NoValidConnectionsError):
+            return TransportError("Could not reach the host on that port.")
         if isinstance(exc, OSError) and exc.errno is not None:
             return TransportError(f"Network error: {exc.strerror or exc}")
         return TransportError(str(exc) or exc.__class__.__name__)

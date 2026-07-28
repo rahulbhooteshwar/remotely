@@ -26,9 +26,21 @@ Screen {
     border: tall #7aa2f7;
 }
 
+/* The switcher must claim the space left over inside #root. Without an
+   explicit height its terminal child sizes itself against the whole screen,
+   overruns the footer and pushes the status line off the bottom. */
+#content {
+    height: 1fr;
+    width: 100%;
+}
+
 #body {
     height: 1fr;
     margin: 1 1 0 1;
+}
+
+#launcher {
+    height: 100%;
 }
 
 #results {
