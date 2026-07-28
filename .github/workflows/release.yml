@@ -243,8 +243,22 @@ jobs:
           body: |
             # Remotely v${{ needs.prepare.outputs.version }}
 
-            Terminal based SSH hosts and connection manager. **One binary, no
-            dependencies** - no Python, no uv, no tmux, no OpenSSH, no sshpass.
+            Terminal based SSH hosts and connection manager. **Self-contained,
+            no dependencies** - no Python, no uv, no tmux, no OpenSSH, no
+            sshpass.
+
+            ## Upgrading from v1.x
+
+            `remotely --update` **will not work** from v1.1.0 or earlier. The
+            runtime is now a directory rather than a single file, and the old
+            updater only knows how to replace a file. Re-run the install script
+            once and `--update` works normally from then on:
+
+            ```bash
+            curl -LsSf https://raw.githubusercontent.com/rahulbhooteshwar/remotely/main/install.sh | sh
+            ```
+
+            Your hosts, vault and themes in `~/.remotely` are untouched.
 
             ## Install
 
@@ -252,8 +266,13 @@ jobs:
             curl -LsSf https://raw.githubusercontent.com/rahulbhooteshwar/remotely/main/install.sh | sh
             ```
 
-            Or download the binary for your platform below, `chmod +x` it, and
-            put it on your `PATH`.
+            The installer unpacks the runtime into `~/.local/lib/remotely` and
+            links `remotely` into `~/.local/bin`. Unpacking once at install time
+            rather than on every launch is what keeps startup at ~100ms instead
+            of several seconds on macOS.
+
+            Or download the archive for your platform below, unpack it, and put
+            a link to `remotely/remotely` on your `PATH`.
 
             | Platform | File |
             |---|---|
@@ -274,8 +293,9 @@ jobs:
 
             None. Run `remotely --doctor` to confirm.
 
-            macOS may quarantine a downloaded binary; the installer clears that
-            for you, or run `xattr -d com.apple.quarantine /path/to/remotely`.
+            macOS quarantines anything downloaded; the installer clears it for
+            the whole runtime, or run
+            `xattr -dr com.apple.quarantine /path/to/remotely`.
 
   # Opt-in. Configure PyPI trusted publishing for this repository and remove
   # the `if: false` to enable.
