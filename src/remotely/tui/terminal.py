@@ -72,6 +72,13 @@ class TerminalPane(Widget, can_focus=True):
             super().__init__()
             self.session = session
 
+    class RetryRequested(Message):
+        """The user asked to reconnect this session."""
+
+        def __init__(self, session: Session) -> None:
+            super().__init__()
+            self.session = session
+
     def __init__(self, session: Session, **kwargs) -> None:
         super().__init__(**kwargs)
         self.session = session
@@ -90,6 +97,8 @@ class TerminalPane(Widget, can_focus=True):
         self._fg_default = pane_styles["color"]
         self._blank_style = Style(bgcolor=self._bg_default, color=self._fg_default)
         self._selection_cache: Style | None = None
+        #: Rows the retry button occupies, so a click can be mapped back to it.
+        self._retry_rows: set[int] = set()
 
     # ------------------------------------------------------------------ setup
 
@@ -100,6 +109,20 @@ class TerminalPane(Widget, can_focus=True):
     def on_show(self) -> None:
         # Re-sync on tab switch: the pane may have been resized while hidden.
         self._sync_size()
+        self.focus()
+
+    def restart(self) -> None:
+        """Re-arm the pane after its session has been reconnected.
+
+        The close announcement fires once per session; without resetting it a
+        retried session that dies again would never report the second death.
+        """
+        self._announced_close = False
+        self._last_status = ""
+        self._started = time.monotonic()
+        self._retry_rows.clear()
+        self._sync_size()
+        self.refresh()
         self.focus()
 
     # ----------------------------------------------------------------- pumping
@@ -151,6 +174,13 @@ class TerminalPane(Widget, can_focus=True):
         if moved:
             self.refresh()
 
+    def _on_click(self, event: events.Click) -> None:
+        """Clicking the Retry button reconnects, as well as pressing r."""
+        if self.is_dead and event.y in self._retry_rows:
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.RetryRequested(self.session))
+
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         event.stop()
         self._scroll(WHEEL_STEPS)
@@ -175,6 +205,11 @@ class TerminalPane(Widget, can_focus=True):
             session.emulator.scroll_to_live(); self.refresh(); return
 
         if not session.is_live:
+            # Nothing to type at, so the pane's own keys take over.
+            if self.is_dead and event.key in ("r", "R", "enter"):
+                event.prevent_default()
+                event.stop()
+                self.post_message(self.RetryRequested(session))
             return
 
         # Leave the app's own escape hatches alone so the user is never trapped
@@ -229,15 +264,28 @@ class TerminalPane(Widget, can_focus=True):
     def render_line(self, y: int) -> Strip:
         session = self.session
 
-        # A blank pane while connecting or after a failure tells the user
-        # nothing; show the state where they are already looking.
-        if session.status in ("connecting", "error"):
+        # A blank pane while connecting tells the user nothing; show the state
+        # where they are already looking.
+        if session.status == "connecting":
             return self._render_notice(y)
 
         emulator = session.emulator
         if y >= emulator.rows:
             return Strip.blank(self.size.width, self._blank_style)
 
+        if self.is_dead:
+            overlay = self._overlay_strip(y)
+            if overlay is not None:
+                return overlay
+
+        return Strip(self._terminal_segments(y), emulator.cols).adjust_cell_length(
+            self.size.width, self._blank_style
+        )
+
+    def _terminal_segments(self, y: int) -> list[Segment]:
+        """One row of the emulator as styled segments."""
+        session = self.session
+        emulator = session.emulator
         cells = emulator.line(y)
         cursor_x, cursor_y = emulator.cursor
         # A cursor drawn over scrolled-back history is misleading.
@@ -288,10 +336,118 @@ class TerminalPane(Widget, can_focus=True):
             run_start = x
 
         flush(len(cells))
+        return segments
 
-        return Strip(segments, emulator.cols).adjust_cell_length(
-            self.size.width, self._blank_style
+    # ----------------------------------------------------------------- overlay
+
+    @property
+    def is_dead(self) -> bool:
+        """Whether the connection is gone and the pane should offer a retry."""
+        return self.session.status in ("error", "closed")
+
+    def overlay_lines(self) -> list[tuple[str, str]]:
+        """Rows of the disconnected overlay, as ``(text, role)`` pairs.
+
+        Covers both cases the user hits: a handshake that never succeeded, and
+        a live session whose pipe broke underneath them.
+        """
+        session = self.session
+        rows: list[tuple[str, str]] = []
+
+        if session.status == "error":
+            rows.append(("Could not connect", "title"))
+            rows.append(("", "blank"))
+            rows.append((session.error or "Unknown error.", "body"))
+        elif session.ended_cleanly:
+            rows.append(("Session ended", "title"))
+            rows.append(("", "blank"))
+            rows.append((f"{session.host_name} closed the connection.", "body"))
+        else:
+            rows.append(("Connection lost", "title"))
+            rows.append(("", "blank"))
+            detail = session.error or "The connection to the host was dropped."
+            rows.append((detail, "body"))
+            status = session.exit_status
+            # Negative means "no status reported" (paramiko's default), which
+            # is noise rather than information.
+            if status is not None and status > 0:
+                rows.append((f"Remote exited with status {status}.", "body"))
+
+        if session.target_hint:
+            rows.append((session.target_hint, "dim"))
+        for hint in session.failure_hints():
+            rows.append((hint, "dim"))
+
+        rows.append(("", "blank"))
+        rows.append(("[ Retry ]", "button"))
+        rows.append(("r retry     ctrl+w launcher     ctrl+shift+w close", "dim"))
+        return rows
+
+    def _overlay_geometry(self) -> tuple[int, int, int, int, list[tuple[str, str]]]:
+        """``(top, left, width, height, rows)`` for the centred overlay box."""
+        rows = self.overlay_lines()
+        content_width = max((len(text) for text, _ in rows), default=0)
+        width = min(max(content_width + 4, 28), max(self.size.width, 4))
+        height = len(rows) + 2  # a blank line of padding top and bottom
+        top = max(0, (self.size.height - height) // 2)
+        left = max(0, (self.size.width - width) // 2)
+        return top, left, width, height, rows
+
+    def _overlay_strip(self, y: int) -> Strip | None:
+        """The overlay row for ``y``, or None when the box does not cover it.
+
+        Composited over the terminal content rather than replacing the screen,
+        so whatever the session last printed stays readable around it.
+        """
+        top, left, width, height, rows = self._overlay_geometry()
+        if not (top <= y < top + height):
+            self._retry_rows.discard(y)
+            return None
+
+        index = y - top - 1  # first and last rows of the box are padding
+        if index < 0 or index >= len(rows):
+            text, role = "", "blank"
+        else:
+            text, role = rows[index]
+
+        if role == "button":
+            self._retry_rows.add(y)
+        else:
+            self._retry_rows.discard(y)
+
+        theme = self.session.theme
+        panel = Style(bgcolor=_OVERLAY_BG)
+        styles = {
+            "title": panel + Style(color=theme.accent, bold=True),
+            "body": panel + Style(color="#e6edf3"),
+            "dim": panel + Style(color="#93a1b5"),
+            "button": panel + Style(color=_OVERLAY_BG, bgcolor=theme.accent, bold=True),
+            "blank": panel,
+        }
+        style = styles.get(role, panel)
+
+        inner = width - 2
+        centred = text.center(inner)[:inner] if text else " " * inner
+        # The button reads as a control, so only its label is inverted.
+        if role == "button":
+            pad = (inner - len(text)) // 2
+            box = [
+                Segment(" " * (pad + 1), panel),
+                Segment(text, style),
+                Segment(" " * (inner - pad - len(text) + 1), panel),
+            ]
+        else:
+            box = [Segment(" ", panel), Segment(centred, style), Segment(" ", panel)]
+
+        # Keep the live terminal visible to the left and right of the box.
+        row = self._terminal_segments(y)
+        left_part = Strip(row, self.session.emulator.cols).crop(0, left)
+        right_part = Strip(row, self.session.emulator.cols).crop(
+            min(left + width, self.size.width), self.size.width
         )
+        return Strip(
+            [*left_part, *box, *right_part]
+        ).adjust_cell_length(self.size.width, self._blank_style)
 
     def notice_lines(self) -> list[tuple[str, Style]]:
         """The connecting / failed message, as (text, style) rows."""
@@ -349,6 +505,10 @@ RESERVED_KEYS = frozenset(
         "ctrl+pagedown",
     }
 )
+
+#: Overlay panel background. Deliberately not theme-derived: it must read as a
+#: panel floating above the session, whatever colour that session is.
+_OVERLAY_BG = "#161b22"
 
 _REVERSE = Style(reverse=True)
 _STYLE_CACHE: dict[tuple, Style] = {}

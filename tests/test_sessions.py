@@ -241,3 +241,68 @@ def test_vault_backed_credential_reaches_the_server(
     assert wait_for(lambda: session.status != "connecting", timeout=15)
     assert session.status == "connected", session.error
     assert "Welcome" in pump(session, "Welcome")
+
+
+# ----------------------------------------------------------------------- retry
+
+
+def test_reopen_keeps_the_session_id(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
+) -> None:
+    """The id is what ties a session to its tab, so a retry must not change it."""
+    session = connect(manager, server, themes)
+    assert session.status == "connected", session.error
+    original_id = session.id
+    pump(session, "Welcome")
+
+    session.transport.close()
+    assert wait_for(lambda: not session.is_live, timeout=10)
+
+    host = make_host(server)
+    manager.reopen(session, host, credential(), cols=80, rows=24)
+    assert wait_for(lambda: session.status != "connecting", timeout=15)
+
+    assert session.status == "connected", session.error
+    assert session.id == original_id
+    assert manager.get(original_id) is session
+    assert "Welcome" in pump(session, "Welcome")
+
+
+def test_reopen_discards_output_from_the_dead_connection(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
+) -> None:
+    """Stale bytes must not surface above the new login.
+
+    The reader buffers whatever arrived before the pipe broke. Left in place,
+    that output would be replayed into the reconnected session's screen.
+    """
+    session = connect(manager, server, themes)
+    pump(session, "Welcome")
+    session.transport.close()
+    assert wait_for(lambda: not session.is_live, timeout=10)
+
+    # Something the old connection "received" but which was never drained.
+    session.push(b"STALE-OUTPUT-FROM-DEAD-SESSION")
+
+    host = make_host(server)
+    manager.reopen(session, host, credential(), cols=80, rows=24)
+    assert wait_for(lambda: session.status != "connecting", timeout=15)
+    assert session.status == "connected", session.error
+
+    screen = pump(session, "Welcome")
+    assert "STALE-OUTPUT" not in screen, screen
+
+
+def test_ended_cleanly_distinguishes_exit_from_a_broken_pipe(
+    manager: SessionManager, server: SSHTestServer, themes: ThemeRegistry
+) -> None:
+    session = connect(manager, server, themes)
+    pump(session, "Welcome")
+    session.write(b"exit\r")
+    assert wait_for(lambda: not session.is_live, timeout=10)
+    assert session.ended_cleanly, (session.status, session.error, session.exit_status)
+
+    broken = connect(manager, server, themes)
+    pump(broken, "Welcome")
+    broken.error = "Socket closed"
+    assert not broken.ended_cleanly

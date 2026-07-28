@@ -921,6 +921,215 @@ async def test_successful_connect_leaves_no_status_chatter() -> None:
             app.sessions.close_all()
 
 
+def _pane_rows(pane) -> list[str]:
+    return [
+        "".join(seg.text for seg in pane.render_line(y)).strip()
+        for y in range(pane.size.height)
+    ]
+
+
+async def test_failed_launch_shows_a_retry_overlay() -> None:
+    """A handshake that never succeeded offers a way to try again."""
+    from remotely.models import Credential
+    from remotely.tui.terminal import TerminalPane
+
+    from .conftest import PASSCODE
+
+    app = build_app()
+    app.store.add(
+        make_host("dead", hostname="127.0.0.1", port=9, auth_mode="credential",
+                  credential="pw")
+    )
+    app.vault.initialise(PASSCODE)
+    app.vault.put(Credential(name="pw", kind="password", password="x"))
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._connect("dead")
+        for _ in range(400):
+            await pilot.pause()
+            sessions = app.sessions.list()
+            if sessions and sessions[0].status == "error":
+                break
+        session = app.sessions.list()[0]
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+        for _ in range(20):
+            await pilot.pause()
+
+        assert pane.is_dead
+        text = " ".join(_pane_rows(pane))
+        assert "Could not connect" in text
+        assert "Retry" in text, "no retry affordance on a failed launch"
+        assert pane._retry_rows, "retry button has no clickable row"
+        app.sessions.close_all()
+
+
+async def test_broken_pipe_shows_the_overlay_over_the_session() -> None:
+    """An in-flight disconnect must say so without wiping what was on screen."""
+    import paramiko
+
+    from remotely.models import Credential
+    from remotely.tui.terminal import TerminalPane
+
+    from .conftest import PASSCODE
+    from .sshserver import PASSWORD, USERNAME, SSHTestServer
+
+    with SSHTestServer(host_key=paramiko.RSAKey.generate(2048)) as server:
+        app = RemotelyApp()
+        app.store.add(
+            make_host("box", hostname=server.hostname, username=USERNAME,
+                      port=server.port, auth_mode="credential", credential="pw")
+        )
+        app.vault.initialise(PASSCODE)
+        app.vault.put(Credential(name="pw", kind="password", password=PASSWORD))
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            app._connect("box")
+            for _ in range(400):
+                await pilot.pause()
+                sessions = app.sessions.list()
+                if sessions and sessions[0].status == "connected":
+                    break
+            session = app.sessions.list()[0]
+            pane = app.query_one(f"#{session.id}", TerminalPane)
+            for _ in range(80):
+                await pilot.pause()
+                if "Welcome" in "\n".join(session.emulator.display()):
+                    break
+
+            # The pipe breaks underneath a live session.
+            session.transport.close()
+            for _ in range(200):
+                await pilot.pause()
+                if not session.is_live:
+                    break
+            for _ in range(20):
+                await pilot.pause()
+
+            assert pane.is_dead
+            rows = _pane_rows(pane)
+            text = " ".join(rows)
+            assert "Connection lost" in text
+            assert "Retry" in text
+            # Composited, not a wipe: the session's output is still readable.
+            assert any("Welcome to the test server" in row for row in rows), (
+                "overlay replaced the screen instead of floating over it"
+            )
+            app.sessions.close_all()
+
+
+async def test_retry_reconnects_in_the_same_tab() -> None:
+    """Retry must reuse the session id so the tab does not move or vanish."""
+    import paramiko
+
+    from remotely.models import Credential
+    from remotely.tui.terminal import TerminalPane
+
+    from .conftest import PASSCODE
+    from .sshserver import PASSWORD, USERNAME, SSHTestServer
+
+    with SSHTestServer(host_key=paramiko.RSAKey.generate(2048)) as server:
+        app = RemotelyApp()
+        app.store.add(
+            make_host("box", hostname=server.hostname, username=USERNAME,
+                      port=server.port, auth_mode="credential", credential="pw")
+        )
+        app.vault.initialise(PASSCODE)
+        app.vault.put(Credential(name="pw", kind="password", password=PASSWORD))
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            app._connect("box")
+            for _ in range(400):
+                await pilot.pause()
+                sessions = app.sessions.list()
+                if sessions and sessions[0].status == "connected":
+                    break
+            session = app.sessions.list()[0]
+            original_id = session.id
+            pane = app.query_one(f"#{session.id}", TerminalPane)
+            for _ in range(60):
+                await pilot.pause()
+
+            session.transport.close()
+            for _ in range(200):
+                await pilot.pause()
+                if not session.is_live:
+                    break
+            assert not session.is_live
+
+            pane.focus()
+            await pilot.pause()
+            await pilot.press("r")
+            for _ in range(400):
+                await pilot.pause()
+                if session.status == "connected":
+                    break
+            for _ in range(40):
+                await pilot.pause()
+
+            assert session.status == "connected", session.error
+            assert session.id == original_id, "retry minted a new session id"
+            assert app.query(f"Tab#{original_id}"), "the tab was lost on retry"
+            assert len(app.sessions.live()) == 1
+            assert not pane.is_dead
+            # A reconnected session must be able to report a second death.
+            assert pane._announced_close is False
+            app.sessions.close_all()
+
+
+async def test_clean_exit_is_not_reported_as_a_failure() -> None:
+    """Typing `exit` is not a broken pipe and must not be described as one."""
+    import paramiko
+
+    from remotely.models import Credential
+    from remotely.tui.terminal import TerminalPane
+
+    from .conftest import PASSCODE
+    from .sshserver import PASSWORD, USERNAME, SSHTestServer
+
+    with SSHTestServer(host_key=paramiko.RSAKey.generate(2048)) as server:
+        app = RemotelyApp()
+        app.store.add(
+            make_host("box", hostname=server.hostname, username=USERNAME,
+                      port=server.port, auth_mode="credential", credential="pw")
+        )
+        app.vault.initialise(PASSCODE)
+        app.vault.put(Credential(name="pw", kind="password", password=PASSWORD))
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            app._connect("box")
+            for _ in range(400):
+                await pilot.pause()
+                sessions = app.sessions.list()
+                if sessions and sessions[0].status == "connected":
+                    break
+            session = app.sessions.list()[0]
+            pane = app.query_one(f"#{session.id}", TerminalPane)
+            for _ in range(80):
+                await pilot.pause()
+                if "Welcome" in "\n".join(session.emulator.display()):
+                    break
+
+            session.write(b"exit\r")
+            for _ in range(300):
+                await pilot.pause()
+                if not session.is_live:
+                    break
+            for _ in range(20):
+                await pilot.pause()
+
+            assert not session.is_live
+            text = " ".join(_pane_rows(pane))
+            assert "Session ended" in text, text
+            assert "Connection lost" not in text
+            # Still offers to reconnect - that is the common next thing to want.
+            assert "Retry" in text
+            app.sessions.close_all()
+
+
 async def test_connecting_uses_the_rich_dots_spinner() -> None:
     from rich.spinner import SPINNERS
 

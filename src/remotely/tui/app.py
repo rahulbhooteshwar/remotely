@@ -691,6 +691,67 @@ class RemotelyApp(App[None]):
     # command - so tabs drifted into showing different things depending on which
     # box you connected to. The tab names the host record you launched, always.
 
+    @on(TerminalPane.RetryRequested)
+    def _on_retry_requested(self, event: TerminalPane.RetryRequested) -> None:
+        self._retry_session(event.session.id)
+
+    @work
+    async def _retry_session(self, session_id: str) -> None:
+        """Reconnect a dead session in its existing tab."""
+        session = self.sessions.get(session_id)
+        if session is None:
+            return
+        if session.is_live:
+            return  # already back; a double press must not tear it down
+
+        host = self.store.get(session.host_name)
+        if host is None:
+            self._status(
+                f"{session.host_name} is no longer in your hosts.", error=True
+            )
+            return
+
+        credential = await self._credential_for(host)
+        if credential is False:  # cancelled or unavailable; message already shown
+            return
+
+        try:
+            pane = self.query_one(f"#{session.id}", TerminalPane)
+        except NoMatches:
+            return
+        cols = max(pane.size.width, 20)
+        rows = max(pane.size.height, 10)
+
+        try:
+            self.sessions.reopen(
+                session, host, credential, cols=cols, rows=rows
+            )
+        except TransportError as exc:
+            self._status(str(exc), error=True)
+            return
+
+        pane.restart()
+        self._refresh_banner()
+        self._refresh_results()
+        self._watch_connection(session)
+
+    async def _credential_for(self, host: Host) -> Credential | None | bool:
+        """The host's credential, or False when it could not be obtained.
+
+        False rather than None because None is the legitimate answer for hosts
+        that use an agent or a bare key.
+        """
+        if not (host.auth_mode == "credential" and host.credential):
+            return None
+        if not await self._ensure_vault(f"Unlock the vault to connect to {host.name}."):
+            self._status("Cancelled: vault stayed locked.", error=True)
+            return False
+        try:
+            return self.vault.require(host.credential)
+        except VaultError as exc:
+            self._status(str(exc), error=True)
+            return False
+
     @on(SessionTab.CloseRequested)
     def _on_tab_close_clicked(self, event: SessionTab.CloseRequested) -> None:
         self._request_close(event.tab_id)
@@ -735,16 +796,9 @@ class RemotelyApp(App[None]):
             self._status(f"No host named {host_name!r}.", error=True)
             return
 
-        credential: Credential | None = None
-        if host.auth_mode == "credential" and host.credential:
-            if not await self._ensure_vault(f"Unlock the vault to connect to {host.name}."):
-                self._status("Cancelled: vault stayed locked.", error=True)
-                return
-            try:
-                credential = self.vault.require(host.credential)
-            except VaultError as exc:
-                self._status(str(exc), error=True)
-                return
+        credential = await self._credential_for(host)
+        if credential is False:  # cancelled or unavailable; already reported
+            return
 
         theme = self.themes.get(host.theme)
         body = self.query_one("#body")

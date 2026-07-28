@@ -559,6 +559,7 @@ class HelpScreen(ModalScreen[None]):
   shift+pageup     scroll back through output
   shift+pagedown   scroll forward
   shift+end        jump back to the live edge
+  r                retry, when a session has disconnected
   mouse wheel      scroll
   drag             select text - copied to the clipboard on release
   Every other key goes to the remote shell, including ctrl+c and ctrl+d.

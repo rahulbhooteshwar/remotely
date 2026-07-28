@@ -150,9 +150,52 @@ class Session:
         finally:
             self.status = "closed"
 
+    def prepare_retry(self, transport: Transport, cols: int, rows: int) -> None:
+        """Point this session at a fresh transport, keeping its identity.
+
+        Reusing the session id is the point: the tab and its pane stay exactly
+        where they are, so retrying never shuffles the tab row. The screen
+        starts clean - replaying a dead session's last output above a fresh
+        login would be misleading.
+        """
+        try:
+            self.transport.close()
+        except Exception:
+            pass  # already dead - that is usually why we are retrying
+
+        # Stop the old reader before swapping anything it touches.
+        self._stop.set()
+        reader, self._reader = self._reader, None
+        if (
+            reader is not None
+            and reader.is_alive()
+            and reader is not threading.current_thread()
+        ):
+            reader.join(timeout=1.0)
+
+        self._stop = threading.Event()
+        with self._lock:
+            self._buffer.clear()
+
+        self.transport = transport
+        self.emulator = TerminalEmulator(cols, rows)
+        self.status = "connecting"
+        self.error = None
+        spec = getattr(transport, "spec", None)
+        self.notes = list(spec.notes) if spec is not None else []
+
     @property
     def exit_status(self) -> int | None:
         return self.transport.exit_status
+
+    @property
+    def ended_cleanly(self) -> bool:
+        """Ended by the user (``exit``), rather than broken underneath them."""
+        return (
+            self.status == "closed"
+            and not self.error
+            and self.exit_status in (0, None)
+        )
 
 
 class SessionManager:
@@ -209,6 +252,39 @@ class SessionManager:
         )
         self._sessions[session.id] = session
         self._order.append(session.id)
+        self._handshake(session, cols, rows, on_ready)
+        return session
+
+    def reopen(
+        self,
+        session: Session,
+        host: Host,
+        credential: Credential | None,
+        *,
+        cols: int = 80,
+        rows: int = 24,
+        on_ready: Callable[[Session], None] | None = None,
+    ) -> Session:
+        """Reconnect a dead session in place, keeping its id, tab and pane."""
+        transport = create_transport(host, credential)
+        session.prepare_retry(transport, cols, rows)
+        # A session closed earlier may have been dropped from the registry.
+        if session.id not in self._sessions:
+            self._sessions[session.id] = session
+            if session.id not in self._order:
+                self._order.append(session.id)
+        self._handshake(session, cols, rows, on_ready)
+        return session
+
+    @staticmethod
+    def _handshake(
+        session: Session,
+        cols: int,
+        rows: int,
+        on_ready: Callable[[Session], None] | None,
+    ) -> None:
+        """Run the connect off the UI thread and record how it went."""
+        transport = session.transport
 
         def connect() -> None:
             try:
@@ -227,7 +303,6 @@ class SessionManager:
                     on_ready(session)
 
         threading.Thread(target=connect, daemon=True, name=f"connect-{session.id}").start()
-        return session
 
     def close(self, session_id: str) -> Session:
         session = self._sessions.get(session_id)

@@ -123,6 +123,25 @@ would silently kill the close-tab binding. Deliberate call: keep the protocol,
 document paste as the route for emoji. Don't "fix" this by disabling Kitty
 without also rebinding close-tab.
 
+### Disconnect overlay and retry
+
+A dead session (`error` or `closed`) draws a centred panel over the pane —
+`TerminalPane._overlay_strip()` composites it onto `_terminal_segments(y)`
+rather than replacing the screen, so whatever the session last printed stays
+readable around it. Three wordings, driven by state: `error` → "Could not
+connect", `Session.ended_cleanly` → "Session ended", otherwise → "Connection
+lost". `exit_status` is only shown when positive; paramiko reports `-1` for
+"none given".
+
+Retry goes through `SessionManager.reopen()`, which calls
+`Session.prepare_retry()` and **keeps the session id**. That is deliberate: the
+id is the tab id and the pane id, so reusing it means the tab neither moves nor
+is rebuilt. `prepare_retry` must stop the old reader thread, swap in a fresh
+`_stop` event and clear `_buffer` — bytes buffered from the dead connection
+would otherwise be replayed over the new login. The pane's `restart()` clears
+`_announced_close`, without which a retried session that dies again never
+reports the second death.
+
 ### Tab titles and shortcut context
 
 A tab is named after the **host record**, never the remote's OSC title. Shells

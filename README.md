@@ -155,6 +155,7 @@ The input at the top is the only control surface. It completes as you type.
 | `Ctrl+Shift+W` | close the current tab (or click the `✕` on the tab) |
 | `Shift+PageUp` / `Shift+PageDown` | scroll back through session output |
 | `Shift+End` | jump back to the live edge |
+| `R` | reconnect a disconnected session (or click **Retry** in the overlay) |
 | mouse wheel | scroll the session |
 | drag | select session text - copied to the clipboard when you release |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | previous / next tab |
