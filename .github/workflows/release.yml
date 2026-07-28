@@ -53,27 +53,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # PyInstaller cannot cross-compile: it freezes the host interpreter
+          # and its native extensions. So each target needs an interpreter of
+          # that architecture - either a native runner, or (for Intel macOS) an
+          # x86_64 Python running under Rosetta on Apple Silicon.
           - os: ubuntu-latest
             target: linux-x86_64
-          # PyInstaller cannot cross-compile - it freezes the host interpreter
-          # and native extensions - so every target needs its own runner.
+            expect_arch: x86-64
           - os: ubuntu-24.04-arm
             target: linux-arm64
+            expect_arch: aarch64
           - os: macos-latest
             target: macos-arm64
-          - os: macos-13
+            expect_arch: arm64
+          - os: macos-latest
             target: macos-x86_64
+            expect_arch: x86_64
+            rosetta: "true"
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
       # __init__.py is the single source of truth; pyproject reads it via
-      # hatch's dynamic version, so this one edit covers everything.
+      # hatch's dynamic version, so this one edit covers everything. It must
+      # happen before either build path installs the project.
       - name: Inject version
         shell: bash
         run: |
@@ -90,10 +93,65 @@ jobs:
           path.write_text(new, encoding="utf-8")
           PY
 
+      # Intel macOS runners are scarce enough to stall a release indefinitely,
+      # so the x86_64 build borrows an Apple Silicon runner instead: an x86_64
+      # Python executes under Rosetta, pip resolves x86_64 wheels, and
+      # PyInstaller freezes that. The arch assertion below is what stops a
+      # silent arm64 build being published as Intel.
+      - name: Enable Rosetta
+        if: matrix.rosetta == 'true'
+        run: |
+          softwareupdate --install-rosetta --agree-to-license || true
+          arch -x86_64 /usr/bin/true && echo "Rosetta can execute x86_64"
+
+      - name: Use an x86_64 Python
+        if: matrix.rosetta == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+
+      - name: Build the x86_64 binary under Rosetta
+        if: matrix.rosetta == 'true'
+        run: |
+          python -c "import platform,sys; print('interpreter arch:', platform.machine()); sys.exit(0 if platform.machine()=='x86_64' else 1)"
+          python -m pip install --upgrade pip
+          python -m pip install . pyinstaller
+          python -m PyInstaller --noconfirm --clean remotely.spec
+
+      - name: Install uv
+        if: matrix.rosetta != 'true'
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
       - run: uv sync
+        if: matrix.rosetta != 'true'
 
       - name: Build the self-contained binary
+        if: matrix.rosetta != 'true'
         run: uv run pyinstaller --noconfirm --clean remotely.spec
+
+      # Shipping a binary of the wrong architecture is worse than shipping
+      # none: it installs happily and then refuses to exec.
+      - name: Verify the binary architecture
+        shell: bash
+        run: |
+          file dist/remotely
+          if [ "$(uname -s)" = "Darwin" ]; then
+            got=$(lipo -archs dist/remotely)
+          else
+            case "$(file -b dist/remotely)" in
+              *x86-64*)  got="x86-64" ;;
+              *aarch64*) got="aarch64" ;;
+              *)         got="unknown" ;;
+            esac
+          fi
+          echo "expected: ${{ matrix.expect_arch }}   got: $got"
+          case "$got" in
+            *"${{ matrix.expect_arch }}"*) echo "architecture matches" ;;
+            *) echo "::error::${{ matrix.target }} produced '$got', expected ${{ matrix.expect_arch }}"; exit 1 ;;
+          esac
 
       - name: Verify it runs with no dependencies present
         shell: bash
