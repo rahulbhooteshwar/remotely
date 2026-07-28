@@ -451,7 +451,12 @@ class RemotelyApp(App[None]):
         for widget in widgets:
             container.mount(widget)
         self._nav_index = None
+        # Set the state now so ctrl+e has a target immediately, then paint the
+        # highlight once the mounts have landed - mount() is asynchronous, so
+        # querying for the widget on this pass finds nothing and the first row
+        # would sit unhighlighted until the user pressed a key.
         self._highlight(0)
+        self.call_after_refresh(self._highlight, 0)
 
     def _grouped_host_widgets(self) -> list:
         groups = self.store.groups()

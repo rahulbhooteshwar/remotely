@@ -76,6 +76,7 @@ Screen {
     height: 2;
     background: #0d1117;
     pointer: pointer;
+    margin-bottom: 1;
 }
 
 .host-tile.alt {
@@ -86,8 +87,22 @@ Screen {
     background: #1c2534;
 }
 
+/* The keyboard highlight has to be distinguishable from the theme stripe on
+   the left edge, which is already a strong colour and varies per host. A
+   near-navy fill read as "part of the stripe"; this is bright enough to be
+   unambiguously the selection, and the text lifts with it. */
 .host-tile.-highlight {
-    background: #24304a;
+    background: #33518f;
+}
+
+.host-tile.-highlight .tile-line {
+    color: #f0f5ff;
+    text-style: bold;
+}
+
+.host-tile.-highlight .tile-tags {
+    color: #bccdf0;
+    text-style: none;
 }
 
 .tile-body {
