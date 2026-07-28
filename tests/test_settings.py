@@ -73,11 +73,37 @@ def test_toggle_rejects_an_unknown_name() -> None:
         Settings().toggle("nope")
 
 
-def test_every_field_has_a_label() -> None:
-    """The /settings list is built from LABELS; a field missing one is invisible."""
+def test_every_toggle_has_a_label() -> None:
+    """The /settings list is built from LABELS; a toggle missing one is invisible.
+
+    Only booleans belong there. app_theme is set from the command palette, not
+    by toggling, so it is deliberately absent.
+    """
     from dataclasses import fields
 
-    names = {f.name for f in fields(Settings)}
-    assert names == set(LABELS), "LABELS and Settings fields are out of step"
+    toggles = {
+        f.name for f in fields(Settings)
+        if isinstance(getattr(Settings(), f.name), bool)
+    }
+    assert toggles == set(LABELS), "LABELS and the boolean settings are out of step"
     for label, help_text in LABELS.values():
         assert label and help_text
+
+
+def test_app_theme_is_stored_but_not_a_toggle() -> None:
+    assert "app_theme" not in LABELS
+    assert Settings().app_theme == ""
+
+    settings_module.save(Settings(app_theme="nord"))
+    assert settings_module.load().app_theme == "nord"
+
+    with __import__("pytest").raises(KeyError):
+        Settings().toggle("app_theme")
+
+
+def test_a_theme_name_survives_the_round_trip() -> None:
+    """Regression: from_dict coerced every field with bool(), so a theme name
+    came back as True and the choice was silently lost."""
+    loaded = Settings.from_dict({"app_theme": "gruvbox", "confirm_quit": False})
+    assert loaded.app_theme == "gruvbox"
+    assert loaded.confirm_quit is False

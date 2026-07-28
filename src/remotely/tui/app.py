@@ -312,6 +312,7 @@ class RemotelyApp(App[None]):
         self._nav: list[str] = []
         self._nav_index: int | None = None
         self._generation = 0
+        self._theme_ready = False
         self._selected_host: Host | None = None
 
     # ------------------------------------------------------------------ layout
@@ -336,6 +337,7 @@ class RemotelyApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._restore_app_theme()
         self.query_one("#command-bar", CommandBar).focus()
         self._refresh_banner()
         self._refresh_results()
@@ -358,6 +360,38 @@ class RemotelyApp(App[None]):
         except NoMatches:
             return False
         return True
+
+    # --------------------------------------------------------------- app theme
+
+    def _restore_app_theme(self) -> None:
+        """Re-apply the theme picked from the command palette last time.
+
+        Textual's `theme` is an in-memory reactive - it has no idea our config
+        directory exists - so a choice made in the palette lasted only until
+        the app closed.
+        """
+        wanted = self.settings.app_theme
+        if wanted and wanted != self.theme:
+            # A theme can vanish between versions, or the file can be edited by
+            # hand. Falling back to the default beats refusing to start.
+            if wanted in self.available_themes:
+                self.theme = wanted
+            else:
+                self.settings.app_theme = ""
+        self._theme_ready = True
+
+    def watch_theme(self, theme: str) -> None:
+        """Persist the palette's choice as soon as it is made."""
+        if not getattr(self, "_theme_ready", False):
+            return  # still starting up; nothing the user chose yet
+        if theme == self.settings.app_theme:
+            return
+        self.settings.app_theme = theme
+        try:
+            settings_module.save(self.settings)
+        except OSError:
+            # A theme is not worth failing a keystroke over.
+            pass
 
     def _refresh_banner(self) -> None:
         if not self._dom_alive():

@@ -24,29 +24,46 @@ class Settings:
     confirm_quit: bool = True
     #: Ask before closing a tab whose session is still live.
     confirm_close_tab: bool = True
+    #: Textual's application theme, chosen from the command palette. Empty
+    #: means "whatever Textual defaults to". Not a toggle, so it is absent
+    #: from LABELS and does not appear in the /settings list.
+    app_theme: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Settings":
-        known = {f.name: f for f in fields(cls)}
+        """Build from stored JSON, coercing each field to its declared type.
+
+        Per-field rather than blanket ``bool()``: the settings file is not all
+        switches any more, and coercing a theme name to a bool would silently
+        throw it away.
+        """
         values: dict[str, Any] = {}
-        for name, field in known.items():
-            if name in raw:
-                values[name] = bool(raw[name])
+        for field in fields(cls):
+            if field.name not in raw:
+                continue
+            value = raw[field.name]
+            if field.type in (bool, "bool"):
+                values[field.name] = bool(value)
+            elif field.type in (str, "str"):
+                values[field.name] = str(value) if value is not None else ""
+            else:
+                values[field.name] = value
         return cls(**values)
 
     def toggle(self, name: str) -> bool:
-        """Flip a preference and return its new value."""
-        if not hasattr(self, name):
+        """Flip a boolean preference and return its new value."""
+        if not hasattr(self, name) or not isinstance(getattr(self, name), bool):
             raise KeyError(name)
         new = not getattr(self, name)
         setattr(self, name, new)
         return new
 
 
-#: Order and wording used by the ``/settings`` list.
+#: Order and wording used by the ``/settings`` list. Booleans only - anything
+#: set elsewhere (the app theme comes from the command palette) stays out.
 LABELS: dict[str, tuple[str, str]] = {
     "confirm_quit": (
         "Confirm before quitting",

@@ -217,7 +217,8 @@ Everything lives in `~/.remotely`:
 ```
 ~/.remotely/
 ├── hosts.json      host definitions - never contains secrets
-├── settings.json   preferences (confirmation prompts, etc.), set via /settings
+├── settings.json   preferences: confirmation prompts (/settings) and the
+│                   app theme you picked from the command palette
 ├── vault.enc       encrypted credentials
 ├── known_hosts     host keys Remotely has learned
 └── themes/         your own themes, override bundled ones by name

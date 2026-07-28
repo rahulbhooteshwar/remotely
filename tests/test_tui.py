@@ -1792,3 +1792,38 @@ async def test_settings_command_persists_a_toggle() -> None:
 
         assert app.settings.confirm_quit is False
         assert settings_module.load().confirm_quit is False, "toggle was not persisted"
+
+
+async def test_app_theme_survives_a_restart() -> None:
+    """Regression: the palette's theme choice lasted only until the app closed.
+
+    Textual's `theme` is an in-memory reactive with no idea our config
+    directory exists, so nothing was ever written down.
+    """
+    from remotely import settings as settings_module
+
+    app = RemotelyApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        picked = next(t for t in app.available_themes if t != app.theme)
+        app.theme = picked
+        for _ in range(6):
+            await pilot.pause()
+
+    assert settings_module.load().app_theme == picked, "theme was not persisted"
+
+    restarted = RemotelyApp()
+    async with restarted.run_test() as pilot:
+        await pilot.pause()
+        assert restarted.theme == picked, "theme did not come back"
+
+
+async def test_a_theme_that_no_longer_exists_does_not_stop_startup() -> None:
+    from remotely import settings as settings_module
+
+    settings_module.save(settings_module.Settings(app_theme="removed-in-some-upgrade"))
+    app = RemotelyApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.theme in app.available_themes
+        assert app.is_running

@@ -64,6 +64,14 @@ Layered, TUI at the top, no upward dependencies:
   from `hosts.json` so a corrupt or unrecognised preference can never take the
   host list down with it — anything unreadable falls back to defaults. Toggled
   from `/settings`.
+
+  `from_dict` coerces **per field type**, not with a blanket `bool()` — the
+  file is not all switches any more and a theme name would come back as
+  `True`. `LABELS` covers the booleans only, which is what `/settings` lists;
+  `app_theme` is set from Textual's command palette instead. Textual's `theme`
+  is an in-memory reactive that knows nothing about our config directory, so
+  `RemotelyApp.watch_theme` writes it down and `_restore_app_theme` puts it
+  back on start, falling back to the default if the theme has since vanished.
 - **`tui/`** — the Textual app, the `TerminalPane` widget, modal screens.
 - **`tui/results.py`** — the launcher's host tiles, group boxes and completion
   rows. Built from real widgets rather than an `OptionList` because a row needs
