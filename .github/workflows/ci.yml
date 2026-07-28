@@ -78,26 +78,27 @@ jobs:
           softwareupdate --install-rosetta --agree-to-license || true
           arch -x86_64 /usr/bin/true && echo "Rosetta can execute x86_64"
 
-      - name: Use an x86_64 Python
-        if: matrix.rosetta == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          architecture: x64
-
-      - name: Build the x86_64 binary under Rosetta
-        if: matrix.rosetta == 'true'
-        run: |
-          python -c "import platform,sys; print('interpreter arch:', platform.machine()); sys.exit(0 if platform.machine()=='x86_64' else 1)"
-          python -m pip install --upgrade pip
-          python -m pip install . pyinstaller
-          python -m PyInstaller --noconfirm --clean remotely.spec
-
       - name: Install uv
-        if: matrix.rosetta != 'true'
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+
+      # actions/setup-python accepts architecture: x64 here and then hands back
+      # an arm64 interpreter anyway - the install path is even named "x64". uv
+      # takes the architecture as part of the Python request, so it is explicit
+      # and checkable.
+      - name: Build the x86_64 binary under Rosetta
+        if: matrix.rosetta == 'true'
+        run: |
+          PY_REQ="cpython-3.11-macos-x86_64-none"
+          uv python install "$PY_REQ"
+          uv venv --python "$PY_REQ" .venv-x86
+          PY="$PWD/.venv-x86/bin/python"
+          ARCH=$("$PY" -c "import platform; print(platform.machine())")
+          echo "interpreter arch: $ARCH"
+          [ "$ARCH" = "x86_64" ] || { echo "::error::interpreter is $ARCH, need x86_64"; exit 1; }
+          uv pip install --python "$PY" . pyinstaller
+          "$PY" -m PyInstaller --noconfirm --clean remotely.spec
 
       - name: Install dependencies
         if: matrix.rosetta != 'true'
