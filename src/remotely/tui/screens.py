@@ -46,8 +46,8 @@ class PasscodeScreen(ModalScreen[str | None]):
         self.message = message
 
     def compose(self) -> ComposeResult:
-        title = "Create vault passcode" if self.creating else "Unlock vault"
-        with Vertical(classes="modal modal-narrow"):
+        title = "🔒  Create vault passcode" if self.creating else "🔒  Vault locked"
+        with Vertical(classes="modal modal-narrow modal-passcode"):
             yield Label(title, classes="modal-title")
             body = self.message or (
                 "This passcode encrypts every stored credential. "
@@ -60,9 +60,17 @@ class PasscodeScreen(ModalScreen[str | None]):
             if self.creating:
                 yield Input(password=True, placeholder="Confirm passcode", id="confirm")
             yield Static("", id="passcode-error", classes="error")
+            if not self.creating:
+                # Say this once, here, so it does not feel like it will keep
+                # asking on every connection.
+                yield Static(
+                    "Asked once per run. Stays unlocked until you quit or /lock.",
+                    classes="modal-footnote",
+                )
             with Horizontal(classes="modal-buttons"):
                 yield Button("Cancel", id="cancel")
-                yield Button("OK", variant="primary", id="ok")
+                yield Button("Unlock" if not self.creating else "Create",
+                             variant="primary", id="ok")
 
     def on_mount(self) -> None:
         self.query_one("#passcode", Input).focus()

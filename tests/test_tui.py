@@ -244,3 +244,79 @@ async def test_failed_connection_surfaces_in_the_status_line() -> None:
                 break
         assert app.sessions.list()[0].status == "error"
         app.sessions.close_all()
+
+
+async def test_vault_is_asked_for_once_per_run_not_per_connection() -> None:
+    """Unlocking is per app run: a second connect must not re-prompt.
+
+    Encodes the behaviour directly, because it is the difference between the
+    app feeling usable and feeling like it nags.
+    """
+    import paramiko
+
+    from remotely.models import Credential
+    from .conftest import PASSCODE
+    from .sshserver import PASSWORD, USERNAME, SSHTestServer
+
+    with SSHTestServer(host_key=paramiko.RSAKey.generate(2048)) as server:
+        app = RemotelyApp()
+        for name in ("box-a", "box-b"):
+            app.store.add(
+                make_host(
+                    name,
+                    hostname=server.hostname,
+                    username=USERNAME,
+                    port=server.port,
+                    auth_mode="credential",
+                    credential="pw",
+                )
+            )
+        app.vault.initialise(PASSCODE)
+        app.vault.put(Credential(name="pw", kind="password", password=PASSWORD))
+
+        prompts = 0
+        original = app._unlock_vault
+
+        def counting(*args, **kwargs):
+            nonlocal prompts
+            prompts += 1
+            return original(*args, **kwargs)
+
+        app._unlock_vault = counting  # type: ignore[method-assign]
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            assert not app.vault.is_locked  # unlocked by initialise() above
+
+            for host in ("box-a", "box-b"):
+                app._connect(host)
+                for _ in range(300):
+                    await pilot.pause()
+                    if any(s.status != "connecting" for s in app.sessions.for_host(host)):
+                        break
+
+            assert len(app.sessions.list()) == 2
+            assert prompts == 0, "an unlocked vault must never re-prompt"
+            app.sessions.close_all()
+
+
+async def test_passcode_dialog_is_emphasised() -> None:
+    """The prompt appears unannounced mid-task, so it must stand out."""
+    from remotely.tui.screens import PasscodeScreen
+    from textual.widgets import Button
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.push_screen(PasscodeScreen(message="Unlock to continue."))
+        await pilot.pause()
+
+        modal = app.screen.query_one(".modal")
+        classes = modal.classes
+        assert "modal-passcode" in classes, "passcode dialog lost its emphasis class"
+
+        # Centred, not pinned to a corner.
+        assert app.screen.styles.align_horizontal == "center"
+        assert app.screen.styles.align_vertical == "middle"
+
+        # The action is named, not a generic OK.
+        assert app.screen.query_one("#ok", Button).label.plain == "Unlock"

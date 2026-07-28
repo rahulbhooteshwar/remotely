@@ -70,10 +70,42 @@ Screen {
 
 /* ------------------------------------------------------------------ modals */
 
+/* Centre every dialog and dim what is behind it, so the launcher stays visible
+   for context while the dialog is unmistakably the thing being asked of you. */
+ModalScreen {
+    align: center middle;
+    background: #05070b 65%;
+}
+
 .modal {
     background: #11151c;
     border: thick #2a3446;
     padding: 1 2;
+}
+
+/* The passcode prompt is the one dialog that appears unprompted, in the middle
+   of doing something else, so it gets a louder treatment than the rest. */
+.modal-passcode {
+    border: thick #7aa2f7;
+    background: #131a26;
+    padding: 1 3;
+}
+
+.modal-passcode .modal-title {
+    text-style: bold;
+    color: #cddcff;
+    background: #7aa2f7 20%;
+    width: 100%;
+    padding: 0 1;
+    text-align: center;
+}
+
+.modal-passcode Input {
+    border: tall #3d5a99;
+}
+
+.modal-passcode Input:focus {
+    border: tall #7aa2f7;
 }
 
 .modal-narrow {
@@ -97,6 +129,13 @@ Screen {
 .modal-help {
     color: #8b98b0;
     padding-bottom: 1;
+    height: auto;
+}
+
+.modal-footnote {
+    color: #6b7a94;
+    text-style: italic;
+    padding-top: 1;
     height: auto;
 }
 
