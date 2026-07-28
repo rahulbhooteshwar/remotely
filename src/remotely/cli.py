@@ -29,6 +29,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="store_true", help="print the version and exit")
     parser.add_argument("--doctor", action="store_true", help="check the environment and exit")
     parser.add_argument(
+        "--update",
+        action="store_true",
+        help="download and install the latest release, then exit",
+    )
+    parser.add_argument(
         "--config",
         metavar="DIR",
         help=(
@@ -112,6 +117,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.version:
         print(f"remotely {__version__}")
         return 0
+
+    if args.update:
+        from .updater import UpdateError, update
+
+        try:
+            return update()
+        except UpdateError as exc:
+            print(f"Update failed: {exc}", file=sys.stderr)
+            return 1
 
     if args.config:
         os.environ[config.ENV_HOME] = args.config

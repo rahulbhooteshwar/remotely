@@ -63,6 +63,25 @@ uv tool install git+https://github.com/rahulbhooteshwar/remotely
 
 </details>
 
+### Updating
+
+```bash
+remotely --update
+```
+
+Checks the latest release, downloads the binary for your platform, verifies its
+SHA-256 and replaces itself in place. Restart Remotely afterwards. It says so
+and changes nothing when you are already current, and refuses to install
+anything whose checksum does not match.
+
+Re-running the install script does the same thing, if you prefer:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/rahulbhooteshwar/remotely/main/install.sh | sh
+```
+
+Installed from source instead? `uv tool install --force git+https://github.com/rahulbhooteshwar/remotely`
+
 ### Uninstall
 
 ```bash

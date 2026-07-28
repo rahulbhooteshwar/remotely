@@ -130,6 +130,21 @@ load-bearing:
   a top-level script with no package context, so a relative import fails in the
   bundle while working fine from source. Do not "tidy" it back to relative.
 
+## Self-update
+
+`updater.py` implements `remotely --update`: resolve the latest release,
+download this platform's artefact, verify its SHA-256, and `os.replace` over
+`sys.executable`. Replacing a running binary is safe on Unix because rename
+unlinks the old inode, which stays alive until the process exits; staging in
+the destination directory keeps the rename on one filesystem so it is atomic.
+
+Two invariants have tests and should keep them: a checksum mismatch must leave
+the installed binary untouched, and version comparison must be numeric (a
+string compare puts 1.9.0 above 1.10.0).
+
+It uses only the standard library — a HTTP client for one occasional download
+would be weight in every binary.
+
 ## Versioning and release
 
 `__version__` in `src/remotely/__init__.py` is the single source of truth;
@@ -138,7 +153,7 @@ load-bearing:
 `__init__.py` line, and a second copy would drift.
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`: validate tag → test →
-build binaries for macOS arm64, macOS x86_64 and Linux x86_64 → verify each one
+build binaries for macOS arm64, Linux x86_64 and Linux arm64 → verify each one
 runs in a sandbox with `python`, `uv`, `tmux`, `ssh` and `sshpass` absent from
 `PATH` → publish with checksums, plus a wheel and sdist.
 
