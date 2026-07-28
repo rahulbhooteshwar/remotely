@@ -542,8 +542,8 @@ class HelpScreen(ModalScreen[None]):
   tab              accept the highlighted completion
   up / down        move through results
   ctrl+n           new host
-  ctrl+e           edit highlighted host
-  ctrl+d           delete highlighted host
+  ctrl+e           edit host    (this tab's host, or the highlighted one)
+  ctrl+d           delete host  (this tab's host, or the highlighted one)
   ctrl+t           themes
   ctrl+k           vault
   ctrl+l           open sessions

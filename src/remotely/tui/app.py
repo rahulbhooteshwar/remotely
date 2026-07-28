@@ -241,6 +241,32 @@ class RemotelyApp(App[None]):
             f"{live} session{'s' if live != 1 else ''}"
         )
 
+    def active_session(self) -> Session | None:
+        """The session on the current tab, or None on the launcher."""
+        if not self._dom_alive():
+            return None
+        try:
+            current = self._tabs().active
+        except Exception:
+            return None
+        if not current or current == LAUNCHER_TAB:
+            return None
+        return self.sessions.get(current)
+
+    def _context_host(self) -> Host | None:
+        """The host a shortcut should act on, given where the user is.
+
+        On a session tab the launcher's highlighted row is off screen, so acting
+        on it edits or deletes something the user cannot see. The host behind
+        the tab they are looking at is the only sane target there.
+        """
+        session = self.active_session()
+        if session is not None:
+            host = self.store.get(session.host_name)
+            if host is not None:
+                return host
+        return self._selected_host
+
     def _status(self, message: str, *, error: bool = False) -> None:
         if not self._dom_alive():
             return
@@ -585,6 +611,7 @@ class RemotelyApp(App[None]):
 
     def _switch_to(self, tab_id: str) -> None:
         self.query_one("#content", ContentSwitcher).current = tab_id
+        self._sync_banner_visibility(tab_id)
         tabs = self._tabs()
         if tabs.active != tab_id:
             tabs.active = tab_id
@@ -607,6 +634,7 @@ class RemotelyApp(App[None]):
         if not tab_id:
             return
         self.query_one("#content", ContentSwitcher).current = tab_id
+        self._sync_banner_visibility(tab_id)
         if tab_id == LAUNCHER_TAB:
             self.query_one("#command-bar", CommandBar).focus()
         else:
@@ -614,6 +642,15 @@ class RemotelyApp(App[None]):
                 self.query_one(f"#{tab_id}", TerminalPane).focus()
             except Exception:
                 pass
+
+    def _sync_banner_visibility(self, tab_id: str) -> None:
+        """The banner is launcher chrome; a session wants the row for output."""
+        if not self._dom_alive():
+            return
+        try:
+            self.query_one("#banner", Static).display = tab_id == LAUNCHER_TAB
+        except NoMatches:
+            pass
 
     @on(events.TextSelected)
     def _on_text_selected(self, event: events.TextSelected) -> None:
@@ -649,16 +686,10 @@ class RemotelyApp(App[None]):
         self._refresh_banner()
         self._refresh_results()
 
-    @on(TerminalPane.TitleChanged)
-    def _on_pane_title(self, event: TerminalPane.TitleChanged) -> None:
-        # Remote-set titles are useful but must not lose the theme marker that
-        # tells production apart at a glance, nor the close control.
-        theme = event.session.theme
-        try:
-            tab = self._tabs().query_one(f"#{event.session.id}", SessionTab)
-            tab.set_title(event.title[:24])
-        except Exception:
-            pass
+    # A tab is deliberately NOT retitled from the remote's OSC title. Shells set
+    # that to whatever they like - commonly "user@host", sometimes the running
+    # command - so tabs drifted into showing different things depending on which
+    # box you connected to. The tab names the host record you launched, always.
 
     @on(SessionTab.CloseRequested)
     def _on_tab_close_clicked(self, event: SessionTab.CloseRequested) -> None:
@@ -763,10 +794,13 @@ class RemotelyApp(App[None]):
                 error=True,
             )
         elif session.status == "connected":
-            notes = f"  [dim]{' '.join(session.notes)}[/dim]" if session.notes else ""
-            self._status(
-                f"Connected to [b]{session.host_name}[/b] ({session.theme.name}).{notes}"
-            )
+            # No "Connected to X" chatter: the tab and the live pane already say
+            # so. Notes are warnings (options the built-in client cannot honour,
+            # for instance) and would be lost silently, so those still show.
+            if session.notes:
+                self._status(f"[b]{session.host_name}[/b]: {' '.join(session.notes)}")
+            else:
+                self._status("")
         self._refresh_banner()
         self._refresh_results()
 
@@ -847,7 +881,8 @@ class RemotelyApp(App[None]):
 
     @work
     async def action_edit_host(self) -> None:
-        await self._edit_host_async(self._selected_host.name if self._selected_host else "")
+        target = self._context_host()
+        await self._edit_host_async(target.name if target else "")
 
     def _edit_host(self, name: str) -> None:
         self._edit_host_worker(name)
@@ -857,7 +892,7 @@ class RemotelyApp(App[None]):
         await self._edit_host_async(name)
 
     async def _edit_host_async(self, name: str) -> None:
-        host = self.store.get(name) if name else self._selected_host
+        host = self.store.get(name) if name else self._context_host()
         if host is None:
             self._status("Select a host to edit first.", error=True)
             return
@@ -883,7 +918,8 @@ class RemotelyApp(App[None]):
 
     @work
     async def action_delete_host(self) -> None:
-        await self._delete_host_async(self._selected_host.name if self._selected_host else "")
+        target = self._context_host()
+        await self._delete_host_async(target.name if target else "")
 
     def _delete_host(self, name: str) -> None:
         self._delete_host_worker(name)
@@ -893,7 +929,7 @@ class RemotelyApp(App[None]):
         await self._delete_host_async(name)
 
     async def _delete_host_async(self, name: str) -> None:
-        host = self.store.get(name) if name else self._selected_host
+        host = self.store.get(name) if name else self._context_host()
         if host is None:
             self._status("Select a host to delete first.", error=True)
             return

@@ -802,6 +802,125 @@ async def test_tabs_carry_theme_colour_instead_of_an_emoji() -> None:
         app.sessions.close_all()
 
 
+async def test_tab_title_ignores_the_remote_set_title() -> None:
+    """Tabs name the host record, whatever the remote shell calls itself.
+
+    Regression: the OSC title was written onto the tab, so a box whose shell
+    set "user@host" showed that while others showed the host name - the tab
+    row meant different things depending on which server you had reached.
+    """
+    from remotely.tui.app import SessionTab
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        session.status = "connected"
+        await pilot.pause()
+
+        # Exactly what a login shell emits.
+        session.emulator.feed(b"\x1b]0;deploy@prod-web-01:~\x07")
+        for _ in range(15):
+            await pilot.pause()
+
+        assert session.emulator.title == "deploy@prod-web-01:~", "OSC title not parsed"
+        label = str(app.query_one(f"Tab#{session.id}", SessionTab).label)
+        assert "prod-web" in label
+        assert "deploy@" not in label, "remote title leaked onto the tab"
+        app.sessions.close_all()
+
+
+async def test_shortcuts_target_the_session_you_are_looking_at() -> None:
+    """On a session tab, ctrl+e must edit that host, not the hidden highlight."""
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        await pilot.pause()
+
+        # The launcher is highlighting something else entirely, off screen.
+        app._selected_host = app.store.get("laptop")
+        assert app._context_host().name == "prod-web"
+
+        # Back on the launcher the highlight is visible again, so it wins.
+        app.action_show_launcher()
+        await pilot.pause()
+        assert app._context_host().name == "laptop"
+        app.sessions.close_all()
+
+
+async def test_banner_is_hidden_on_a_session_tab() -> None:
+    """The version/host/vault row is launcher chrome, not session chrome."""
+    from textual.widgets import Static
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        banner = app.query_one("#banner", Static)
+        assert banner.display, "banner should show on the launcher"
+
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        await pilot.pause()
+        assert not banner.display, "banner still visible on a session tab"
+
+        app.action_show_launcher()
+        await pilot.pause()
+        assert banner.display, "banner did not come back on the launcher"
+        app.sessions.close_all()
+
+
+async def test_successful_connect_leaves_no_status_chatter() -> None:
+    """"Connected to X" said nothing the tab and pane did not already show."""
+    import paramiko
+
+    from remotely.models import Credential
+    from textual.widgets import Static
+
+    from .conftest import PASSCODE
+    from .sshserver import PASSWORD, USERNAME, SSHTestServer
+
+    with SSHTestServer(host_key=paramiko.RSAKey.generate(2048)) as server:
+        app = RemotelyApp()
+        app.store.add(
+            make_host("testbox", hostname=server.hostname, username=USERNAME,
+                      port=server.port, auth_mode="credential", credential="pw")
+        )
+        app.vault.initialise(PASSCODE)
+        app.vault.put(Credential(name="pw", kind="password", password=PASSWORD))
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._connect("testbox")
+            for _ in range(400):
+                await pilot.pause()
+                sessions = app.sessions.list()
+                if sessions and sessions[0].status == "connected":
+                    break
+            for _ in range(40):
+                await pilot.pause()
+
+            session = app.sessions.list()[0]
+            assert session.status == "connected", session.error
+            status = app.query_one("#status", Static)
+            text = "".join(seg.text for seg in status.render_line(0))
+            assert "Connected to" not in text, f"status still chatters: {text!r}"
+            app.sessions.close_all()
+
+
 async def test_connecting_uses_the_rich_dots_spinner() -> None:
     from rich.spinner import SPINNERS
 

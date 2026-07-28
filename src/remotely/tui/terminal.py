@@ -72,18 +72,9 @@ class TerminalPane(Widget, can_focus=True):
             super().__init__()
             self.session = session
 
-    class TitleChanged(Message):
-        """The remote set a new terminal title."""
-
-        def __init__(self, session: Session, title: str) -> None:
-            super().__init__()
-            self.session = session
-            self.title = title
-
     def __init__(self, session: Session, **kwargs) -> None:
         super().__init__(**kwargs)
         self.session = session
-        self._last_title = ""
         self._announced_close = False
         self._last_status = ""
         self._started = time.monotonic()
@@ -130,11 +121,6 @@ class TerminalPane(Widget, can_focus=True):
         if session.status != self._last_status:
             self._last_status = session.status
             changed = True
-
-        title = session.emulator.title
-        if title and title != self._last_title:
-            self._last_title = title
-            self.post_message(self.TitleChanged(session, title))
 
         if not session.is_live and not self._announced_close:
             self._announced_close = True

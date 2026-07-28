@@ -123,6 +123,26 @@ would silently kill the close-tab binding. Deliberate call: keep the protocol,
 document paste as the route for emoji. Don't "fix" this by disabling Kitty
 without also rebinding close-tab.
 
+### Tab titles and shortcut context
+
+A tab is named after the **host record**, never the remote's OSC title. Shells
+set that to whatever they like ("user@host", the running command), so honouring
+it made the tab row mean different things per server. `TerminalPane` therefore
+does not emit a title message at all — don't reintroduce one.
+
+`_context_host()` is what `ctrl+e` / `ctrl+d` act on: the host behind the
+**current session tab** when one is showing, else the launcher's highlighted
+row. On a session tab the launcher list is off screen, so acting on its
+highlight edits something invisible to the user.
+
+### Chrome that belongs to the launcher only
+
+`#banner` (version / host count / vault / session count) is hidden whenever a
+session tab is active, via `_sync_banner_visibility()` — called from both
+`_switch_to()` and the `Tabs.TabActivated` handler, which are the only two ways
+the visible tab changes. A successful connect deliberately writes **no** status
+line; only `session.notes` (warnings) surface there.
+
 ### Theme icons vs. tab colour
 
 The theme's emoji marks hosts in the **launcher list only**. Tabs convey the
