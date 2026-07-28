@@ -258,3 +258,57 @@ def test_scroll_to_live_terminates(term: TerminalEmulator) -> None:
     term.scroll_up(50)
     term.scroll_to_live()
     assert term.at_live_edge
+
+
+# ------------------------------------------------- hostile output containment
+
+
+def test_private_sgr_does_not_crash(term: TerminalEmulator) -> None:
+    """Regression: a private SGR took the whole application down.
+
+    pyte dispatches `CSI ? ... m` to select_graphic_rendition with
+    private=True, which its own handler does not accept, so the TypeError came
+    straight out of feed() and killed the app mid-session.
+    """
+    term.feed(b"hello ")
+    term.feed(b"\x1b[?4m")
+    term.feed(b"world")
+    assert term.display()[0].strip() == "hello world"
+    assert term.feed_errors == 0, term.last_feed_error
+
+
+def test_normal_sgr_still_applies(term: TerminalEmulator) -> None:
+    """Ignoring private SGR must not blunt the ordinary one."""
+    term.feed(b"\x1b[1mB")
+    assert term.line(0)[0].bold is True
+
+
+def test_feed_never_raises_whatever_the_remote_sends(term: TerminalEmulator) -> None:
+    """Remote output is untrusted input; it may glitch a pane, never crash."""
+    import random
+
+    random.seed(11)
+    for _ in range(2000):
+        size = random.randint(1, 24)
+        term.feed(bytes(random.randint(0, 255) for _ in range(size)))
+    for sequence in (
+        b"\x1b[?4m", b"\x1b[?1049h", b"\x1b[>4;2m", b"\x1b[999999999m",
+        b"\x1b]0;title\x07", b"\x1b[38;2;1;2;3m", b"\x1b[" * 40,
+    ):
+        term.feed(sequence)
+    assert term.display() is not None
+
+
+def test_a_broken_stream_is_recorded_not_raised() -> None:
+    """The safety net itself: an exception from pyte must not escape feed()."""
+    term = TerminalEmulator(40, 6)
+
+    class Exploding:
+        def feed(self, data: bytes) -> None:
+            raise RuntimeError("remote did something awful")
+
+    term.stream = Exploding()
+    term.feed(b"anything")  # must not raise
+
+    assert term.feed_errors == 1
+    assert "RuntimeError" in (term.last_feed_error or "")

@@ -80,6 +80,22 @@ Connecting is threaded end to end because none of it may block the UI:
    the rows that changed. Styles are cached — a screen is thousands of cells but
    only a handful of distinct styles.
 
+### Remote output can never crash the app
+
+`TerminalEmulator.feed()` **never raises**. Whatever arrives down the wire is
+untrusted input, and a sequence pyte mishandles has to degrade to a glitch in
+one pane rather than taking the application - and every other session in it -
+down. pyte recovers its parser on the next feed, so swallowing costs at most
+the offending sequence; `feed_errors` / `last_feed_error` keep the evidence.
+
+One known case is handled properly rather than merely swallowed: pyte
+dispatches a private CSI (`CSI ? ... m`) to the *same* handler as the public
+one with `private=True`, but its own `select_graphic_rendition` does not accept
+that keyword, so a shell emitting one raised `TypeError` straight out of
+`feed`. `_Screen` overrides it to ignore private SGRs, which is the correct
+reading as well as the safe one. Don't drop `_Screen` back to
+`pyte.HistoryScreen`.
+
 pyte reports a cell the remote never explicitly coloured as `"default"`, which
 `terminal.py:resolve_color` turns into `None`. Textual does **not** backfill a
 `None` segment background from the widget's CSS for content lines drawn via

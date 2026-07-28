@@ -72,6 +72,23 @@ class Cell:
     reverse: bool
 
 
+class _Screen(pyte.HistoryScreen):
+    """A HistoryScreen that tolerates private CSI sequences.
+
+    pyte dispatches a private sequence (``CSI ? ... m``) to the same handler as
+    the public one but with ``private=True``, and its own
+    ``select_graphic_rendition`` does not accept that keyword - so a remote
+    emitting one raised TypeError straight out of ``feed`` and took the whole
+    application down. A private SGR is not a standard SGR; ignoring it is the
+    correct reading as well as the safe one.
+    """
+
+    def select_graphic_rendition(self, *attrs: int, **kwargs: object) -> None:
+        if kwargs.get("private"):
+            return
+        super().select_graphic_rendition(*attrs)
+
+
 class TerminalEmulator:
     """A pyte screen fed by raw bytes.
 
@@ -82,18 +99,34 @@ class TerminalEmulator:
     def __init__(self, cols: int = DEFAULT_COLS, rows: int = DEFAULT_ROWS) -> None:
         self.cols = max(cols, 2)
         self.rows = max(rows, 2)
-        self.screen = pyte.HistoryScreen(
+        self.screen = _Screen(
             self.cols, self.rows, history=SCROLLBACK, ratio=SCROLL_RATIO
         )
         self.stream = pyte.ByteStream(self.screen)
         self._title = ""
+        #: Malformed or unsupported sequences seen, kept for --doctor and
+        #: tests rather than shown to the user mid-session.
+        self.feed_errors = 0
+        self.last_feed_error: str | None = None
 
     # ------------------------------------------------------------------ input
 
     def feed(self, data: bytes) -> None:
-        """Push transport output into the emulator."""
-        if data:
+        """Push transport output into the emulator.
+
+        Never raises. Whatever arrives down the wire is untrusted input, and a
+        sequence this emulator mishandles has to degrade to a rendering glitch
+        in one pane - not take the application, and every other session in it,
+        down with it. pyte recovers its parser on the next feed, so swallowing
+        the error here costs at most the sequence that caused it.
+        """
+        if not data:
+            return
+        try:
             self.stream.feed(data)
+        except Exception as exc:  # noqa: BLE001 - deliberately broad
+            self.feed_errors += 1
+            self.last_feed_error = f"{type(exc).__name__}: {exc}"
 
     # -------------------------------------------------------------- scrollback
 
