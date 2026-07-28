@@ -281,6 +281,19 @@ silently.
   addressing, alternate screen and scrollback, so shells, `vim`, `htop` and
   friends work - but exotic escape sequences may render imperfectly.
 
+### Known limitation: emoji in form fields
+
+**Paste emoji rather than using the macOS emoji picker (⌃⌘Space).** Pasting
+works everywhere; the picker inserts the wrong character.
+
+Remotely uses the Kitty keyboard protocol, which is what lets it tell
+`Ctrl+Shift+W` apart from `Ctrl+W`. Under that protocol the terminal reports a
+key code plus the text it produced. The emoji picker inserts text without a
+real keypress, so the terminal reports a bare key code with no associated
+text - and the app has no choice but to take the key code at face value,
+yielding a letter instead of the emoji. The same applies to input methods that
+compose characters, such as CJK IMEs.
+
 ## Development
 
 ```bash

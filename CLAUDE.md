@@ -106,6 +106,23 @@ invokes the base handler itself, so `SessionTab._on_click` must never call
 argument but 2 were given` on every tab click. `event.prevent_default()` breaks
 the MRO walk, which is how a hit on the ✕ suppresses "select this tab".
 
+### Kitty keyboard protocol vs. composed input (known, accepted)
+
+Textual enables Kitty's `DISAMBIGUATE_ESCAPE_CODES | REPORT_ALL_KEYS |
+REPORT_ASSOCIATED_TEXT`. Where a terminal sends the associated-text field
+(`CSI <keycode>;<mods>;<text> u`) the character is correct. Where it sends a
+bare `CSI <keycode> u`, Textual falls back to `chr(keycode)` — correct for a
+real keypress, wrong for text inserted by an input method. The macOS emoji
+picker hits exactly this: it reports keycode 97 with no text, so an emoji
+arrives as `a`. Verified against `textual._xterm_parser`, not just inferred
+from the symptom.
+
+Turning the protocol off (`TEXTUAL_DISABLE_KITTY_KEY=1`) fixes it but makes
+`ctrl+shift+w` indistinguishable from `ctrl+w` — both parse as `ctrl+w` — which
+would silently kill the close-tab binding. Deliberate call: keep the protocol,
+document paste as the route for emoji. Don't "fix" this by disabling Kitty
+without also rebinding close-tab.
+
 ### Theme icons vs. tab colour
 
 The theme's emoji marks hosts in the **launcher list only**. Tabs convey the
