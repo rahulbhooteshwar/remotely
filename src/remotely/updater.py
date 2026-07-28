@@ -184,7 +184,11 @@ def apply_update(release: Release, *, log=print) -> Path:
                 for member in tar.getmembers():
                     if member.name != "remotely" or not member.isfile():
                         continue
-                    tar.extract(member, work)
+                    # Explicit filter, not just to silence the Python 3.12+
+                    # DeprecationWarning: "data" also strips setuid/setgid bits
+                    # and rejects device files, which a single named regular
+                    # member does not otherwise guard against.
+                    tar.extract(member, work, filter="data")
                     break
                 else:
                     raise UpdateError("Archive did not contain a 'remotely' binary.")
