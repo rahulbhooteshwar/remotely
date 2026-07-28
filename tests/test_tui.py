@@ -228,6 +228,39 @@ async def test_tiles_alternate_their_background() -> None:
             assert tile.styles.border_left[0] not in ("", "none", None)
 
 
+async def test_typing_a_group_filter_does_not_crash() -> None:
+    """Regression: typing #group one key at a time raised DuplicateIds.
+
+    remove_children() is asynchronous, exactly like mount(), so the outgoing
+    rows were still registered when their replacements went in. Consecutive
+    keystrokes regenerate the same row key, and Textual rejected the duplicate
+    id - taking the whole app down mid-keystroke.
+    """
+    app = build_app()
+    async with app.run_test(size=(92, 26)) as pilot:
+        await pilot.pause()
+        bar = app.query_one("#command-bar", CommandBar)
+
+        for text in ("#", "#P", "#Pr", "#Pro", "#Prod", "#Production"):
+            bar.value = text
+            await pilot.pause()
+        for _ in range(10):
+            await pilot.pause()
+        assert app.is_running, "app died while typing a group filter"
+
+        # Bouncing between the same few queries regenerates identical keys.
+        for text in ("#P", "#Pr", "#P", "", "#P", "@web", "#P", "prod"):
+            bar.value = text
+            await pilot.pause()
+        for _ in range(10):
+            await pilot.pause()
+        assert app.is_running, "app died while re-typing"
+
+        # Every mounted row still carries a unique id.
+        ids = [w.id for w in app.query("#results > *") if w.id]
+        assert len(ids) == len(set(ids)), f"duplicate row ids: {ids}"
+
+
 async def test_escape_clears_the_bar() -> None:
     app = build_app()
     async with app.run_test() as pilot:

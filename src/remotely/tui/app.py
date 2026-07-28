@@ -311,6 +311,7 @@ class RemotelyApp(App[None]):
         self._rows: dict[str, Completion] = {}
         self._nav: list[str] = []
         self._nav_index: int | None = None
+        self._generation = 0
         self._selected_host: Host | None = None
 
     # ------------------------------------------------------------------ layout
@@ -432,6 +433,7 @@ class RemotelyApp(App[None]):
         container = self._results()
         container.remove_children()
 
+        self._generation += 1
         self._rows = {}
         self._nav: list[str] = []
 
@@ -523,11 +525,18 @@ class RemotelyApp(App[None]):
         widgets.extend(rows)
         return widgets
 
-    @staticmethod
-    def _widget_id(row_id: str) -> str:
-        """A DOM-safe id for a row key."""
+    def _widget_id(self, row_id: str) -> str:
+        """A DOM-safe, refresh-unique id for a row key.
+
+        The generation counter is load-bearing. remove_children() is
+        asynchronous, exactly like mount(), so the outgoing widgets are still
+        registered when the replacements go in. Typing "#Pe" straight after
+        "#P" regenerates the same row key, and Textual rejected the duplicate
+        id with DuplicateIds - crashing the app mid-keystroke. Numbering each
+        refresh means an id can never collide with one on its way out.
+        """
         safe = "".join(c if c.isalnum() else "-" for c in row_id)
-        return f"row-{safe}"
+        return f"row-{self._generation}-{safe}"
 
     def _render_completion(self, completion: Completion) -> str:
         icons = {"command": "\u203a", "tag": "@", "group": "#", "theme": "\u25c8", "path": "\u2026"}

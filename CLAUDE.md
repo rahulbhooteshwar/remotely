@@ -209,6 +209,12 @@ in mind:
 - `_selected_host` is updated by `_highlight()`, and it is what `ctrl+e` /
   `ctrl+d` act on from the launcher.
 
+Row widget ids carry a **generation counter** (`_generation`, bumped every
+refresh). `remove_children()` is asynchronous exactly like `mount()`, so the
+outgoing rows are still registered when the replacements go in; consecutive
+keystrokes regenerate the same row key and Textual raised `DuplicateIds`,
+crashing the app mid-type. Do not simplify the id back to a plain slug.
+
 `IconButton._on_click` must call `event.stop()`. Clicks bubble, so without it
 every icon press would also reach the tile underneath and open a session.
 
