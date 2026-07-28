@@ -43,7 +43,19 @@ case "$OS" in
     Darwin)
         case "$ARCH" in
             arm64|aarch64) TARGET="macos-arm64" ;;
-            x86_64)        TARGET="macos-x86_64" ;;
+            x86_64)
+                # No prebuilt Intel macOS binary: `cryptography`, which encrypts
+                # the vault, publishes arm64-only macOS wheels, so an x86_64
+                # build would have to compile it from source anyway.
+                fail "No prebuilt binary for Intel macOS.
+
+     Install from source instead (needs Xcode command line tools):
+       xcode-select --install
+       curl -LsSf https://astral.sh/uv/install.sh | sh
+       uv tool install git+https://github.com/$REPO
+
+     Apple Silicon Macs get a prebuilt binary from this script."
+                ;;
             *) fail "Unsupported macOS architecture: $ARCH" ;;
         esac
         ;;

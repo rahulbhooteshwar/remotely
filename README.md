@@ -281,12 +281,22 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-That builds and verifies binaries for macOS arm64, macOS x86_64, Linux x86_64
-and Linux arm64, publishes them with checksums, and attaches a wheel and sdist
-too.
+That builds and verifies binaries for macOS arm64, Linux x86_64 and Linux
+arm64, publishes them with checksums, and attaches a wheel and sdist too.
 
 Every target needs its own runner: PyInstaller freezes the host interpreter and
 its native extensions, so it cannot cross-compile.
+
+**Intel macOS has no prebuilt binary.** It can be built on Apple Silicon under
+Rosetta as far as the interpreter, but `cryptography` - the library that
+encrypts the vault - publishes arm64-only macOS wheels, so the x86_64 build
+falls back to compiling it from Rust source. Shipping that from an ad-hoc
+cross-build is not a trade worth making. Intel Mac users install from source:
+
+```bash
+xcode-select --install
+uv tool install git+https://github.com/rahulbhooteshwar/remotely
+```
 
 ## Licence
 

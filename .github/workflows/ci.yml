@@ -47,9 +47,15 @@ jobs:
       matrix:
         include:
           # PyInstaller cannot cross-compile: it freezes the host interpreter
-          # and its native extensions. So each target needs an interpreter of
-          # that architecture - either a native runner, or (for Intel macOS) an
-          # x86_64 Python running under Rosetta on Apple Silicon.
+          # and its native extensions, so each target needs a native runner.
+          #
+          # Intel macOS is deliberately absent. Building it on Apple Silicon
+          # under Rosetta works as far as the interpreter, but `cryptography`
+          # publishes arm64-only macOS wheels, so the x86_64 build falls back
+          # to compiling it from Rust source. Shipping the library that
+          # encrypts the vault from an ad-hoc cross-build is not a trade worth
+          # making for hardware Apple stopped selling in 2023. Intel Mac users
+          # install from source - see install.sh.
           - os: ubuntu-latest
             target: linux-x86_64
             expect_arch: x86-64
@@ -59,53 +65,19 @@ jobs:
           - os: macos-latest
             target: macos-arm64
             expect_arch: arm64
-          - os: macos-latest
-            target: macos-x86_64
-            expect_arch: x86_64
-            rosetta: "true"
 
     steps:
       - uses: actions/checkout@v4
-
-      # Intel macOS runners are scarce enough to stall a run indefinitely, so
-      # the x86_64 build borrows an Apple Silicon runner instead: an x86_64
-      # Python executes under Rosetta, pip resolves x86_64 wheels, and
-      # PyInstaller freezes that. The arch assertion below is what stops a
-      # silent arm64 build being published as Intel.
-      - name: Enable Rosetta
-        if: matrix.rosetta == 'true'
-        run: |
-          softwareupdate --install-rosetta --agree-to-license || true
-          arch -x86_64 /usr/bin/true && echo "Rosetta can execute x86_64"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
 
-      # actions/setup-python accepts architecture: x64 here and then hands back
-      # an arm64 interpreter anyway - the install path is even named "x64". uv
-      # takes the architecture as part of the Python request, so it is explicit
-      # and checkable.
-      - name: Build the x86_64 binary under Rosetta
-        if: matrix.rosetta == 'true'
-        run: |
-          PY_REQ="cpython-3.11-macos-x86_64-none"
-          uv python install "$PY_REQ"
-          uv venv --python "$PY_REQ" .venv-x86
-          PY="$PWD/.venv-x86/bin/python"
-          ARCH=$("$PY" -c "import platform; print(platform.machine())")
-          echo "interpreter arch: $ARCH"
-          [ "$ARCH" = "x86_64" ] || { echo "::error::interpreter is $ARCH, need x86_64"; exit 1; }
-          uv pip install --python "$PY" . pyinstaller
-          "$PY" -m PyInstaller --noconfirm --clean remotely.spec
-
       - name: Install dependencies
-        if: matrix.rosetta != 'true'
         run: uv sync
 
       - name: Build the self-contained binary
-        if: matrix.rosetta != 'true'
         run: uv run pyinstaller --noconfirm --clean remotely.spec
 
       # Shipping a binary of the wrong architecture is worse than shipping
