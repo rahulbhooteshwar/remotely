@@ -49,12 +49,10 @@ case "$OS" in
         ;;
     Linux)
         case "$ARCH" in
-            x86_64|amd64) TARGET="linux-x86_64" ;;
-            aarch64|arm64)
-                fail "No prebuilt Linux arm64 binary yet. Install from source:
-     uv tool install git+https://github.com/$REPO"
-                ;;
-            *) fail "Unsupported Linux architecture: $ARCH" ;;
+            x86_64|amd64)  TARGET="linux-x86_64" ;;
+            aarch64|arm64) TARGET="linux-arm64" ;;
+            *) fail "Unsupported Linux architecture: $ARCH. Install from source:
+     uv tool install git+https://github.com/$REPO" ;;
         esac
         ;;
     *)

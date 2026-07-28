@@ -48,6 +48,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: linux-x86_64
+          # PyInstaller cannot cross-compile - it freezes the host interpreter
+          # and native extensions - so every target needs its own runner.
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
           - os: macos-latest
             target: macos-arm64
           - os: macos-13

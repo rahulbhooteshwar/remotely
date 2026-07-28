@@ -55,6 +55,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: linux-x86_64
+          # PyInstaller cannot cross-compile - it freezes the host interpreter
+          # and native extensions - so every target needs its own runner.
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
           - os: macos-latest
             target: macos-arm64
           - os: macos-13
@@ -213,6 +217,7 @@ jobs:
             | macOS (Apple Silicon) | `remotely-macos-arm64.tar.gz` |
             | macOS (Intel) | `remotely-macos-x86_64.tar.gz` |
             | Linux (x86_64) | `remotely-linux-x86_64.tar.gz` |
+            | Linux (arm64) | `remotely-linux-arm64.tar.gz` |
 
             Each archive has a matching `.sha256`.
 

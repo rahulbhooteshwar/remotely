@@ -36,7 +36,7 @@ Remotely takes none of those trades:
 | **Prod looks like prod** | Per-host themes colour the whole session, so a red pane is never staging |
 | **One input for everything** | Search, commands, tags and groups all come from the same bar |
 | **Credentials are shared, not copied** | One named credential backs many hosts; rotate it once |
-| **Runs where you work** | macOS and Linux, in any terminal, over SSH, in a container |
+| **Runs where you work** | macOS and Linux, x86_64 and arm64, in any terminal, over SSH, in a container |
 
 ## Requirements
 
@@ -281,8 +281,12 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-That builds and verifies binaries for macOS arm64, macOS x86_64 and Linux
-x86_64, publishes them with checksums, and attaches a wheel and sdist too.
+That builds and verifies binaries for macOS arm64, macOS x86_64, Linux x86_64
+and Linux arm64, publishes them with checksums, and attaches a wheel and sdist
+too.
+
+Every target needs its own runner: PyInstaller freezes the host interpreter and
+its native extensions, so it cannot cross-compile.
 
 ## Licence
 
