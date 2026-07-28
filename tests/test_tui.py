@@ -1166,6 +1166,63 @@ async def test_form_buttons_stay_on_screen_at_any_terminal_size(size) -> None:
         assert scroll.region.height >= 1, "no room left for the form fields"
 
 
+@pytest.mark.parametrize("size", [(100, 40), (84, 24), (72, 18), (60, 14)])
+async def test_every_form_field_is_reachable_on_small_screens(size) -> None:
+    """Fixed chrome must not squeeze the form down to an unusable slit.
+
+    Making the buttons sticky is not enough on its own: the title, padding and
+    button row cost the same 11 rows at 14 lines as at 60, which left a
+    one-row scroll viewport - scrollable in principle, unusable in practice.
+    """
+    from remotely.tui.screens import HostFormScreen
+
+    width, height = size
+    app = build_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app.push_screen(HostFormScreen(None, themes=app.themes.names()))
+        for _ in range(12):
+            await pilot.pause()
+
+        scroll = app.screen.query_one(".form-scroll")
+        # Enough to show a labelled field, not just a sliver.
+        assert scroll.region.height >= 5, (
+            f"form viewport is {scroll.region.height} rows at {size}"
+        )
+
+        # The bottom of the form must be reachable by scrolling.
+        scroll.scroll_end(animate=False)
+        for _ in range(8):
+            await pilot.pause()
+        assert scroll.scroll_y == scroll.max_scroll_y, "cannot scroll to the end"
+
+        last_field = list(app.screen.query(".field"))[-1]
+        assert scroll.region.contains_region(last_field.region), (
+            f"last field unreachable at {size}"
+        )
+
+
+async def test_chrome_stays_roomy_on_a_normal_terminal() -> None:
+    """The compact treatment is for small terminals only."""
+    from remotely.tui.screens import HostFormScreen
+
+    app = build_app()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        app.push_screen(HostFormScreen(None, themes=app.themes.names()))
+        for _ in range(12):
+            await pilot.pause()
+        assert not app.screen.query_one(".modal").has_class("compact")
+
+    app2 = RemotelyApp()  # bare: the per-test store already has build_app's hosts
+    async with app2.run_test(size=(60, 14)) as pilot:
+        await pilot.pause()
+        app2.push_screen(HostFormScreen(None, themes=app2.themes.names()))
+        for _ in range(12):
+            await pilot.pause()
+        assert app2.screen.query_one(".modal").has_class("compact")
+
+
 async def test_connecting_uses_the_rich_dots_spinner() -> None:
     from rich.spinner import SPINNERS
 

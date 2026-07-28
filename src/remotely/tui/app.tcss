@@ -179,8 +179,28 @@ ModalScreen {
    became unreachable. Flexing keeps them on screen at any size. */
 .form-scroll {
     height: 1fr;
-    min-height: 1;
+    min-height: 3;
     scrollbar-size-vertical: 1;
+}
+
+/* Applied by CompactOnSmall when the terminal is too short to afford chrome.
+   Every row of padding here is a row the form fields do not get: at 14 rows
+   the normal chrome leaves a one-row viewport. */
+.modal.compact {
+    padding: 0 2;
+}
+
+.modal.compact .modal-title {
+    padding-bottom: 0;
+}
+
+.modal.compact .modal-buttons {
+    padding-top: 0;
+}
+
+.modal-wide.compact,
+.modal-narrow.compact {
+    max-height: 100%;
 }
 
 .field {

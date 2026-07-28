@@ -135,6 +135,14 @@ and columns, and that is how users hit this. Two rules in `app.tcss`:
   width. Without it the dialog overflows a narrow terminal and the
   right-aligned Save button falls off the right edge.
 
+Sticky buttons alone are not enough. A dialog's fixed chrome (padding, the
+title gap, the button row) costs the same ~11 rows at 14 lines as at 60, which
+left the scroll viewport one row tall — scrollable in principle, unusable in
+practice. `CompactOnSmall` (screens.py) adds a `compact` class below
+`COMPACT_BELOW` rows, which collapses that padding and lets the dialog use the
+full height; the fields get the difference. It relies on Textual dispatching
+`on_mount`/`on_resize` down the MRO, so the screens keep their own handlers.
+
 The two failure modes are independent and both are covered by
 `test_form_buttons_stay_on_screen_at_any_terminal_size`, which is
 parametrised over sizes down to 50x12. Verify layout changes by rendering

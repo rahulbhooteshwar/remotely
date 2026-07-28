@@ -35,6 +35,37 @@ def _field(label: str, widget) -> Vertical:
     return box
 
 
+class CompactOnSmall:
+    """Trims dialog chrome when the terminal is too short to spare it.
+
+    A dialog's fixed furniture - padding, the title's gap, the space above the
+    buttons - costs the same 11 rows whether the terminal has 60 or 14. On a
+    short one (a large terminal font gives you exactly that) it swallows the
+    form, leaving a scroll viewport one row tall: technically scrollable,
+    useless in practice. Below the threshold the chrome collapses and the
+    dialog uses the full height, which the fields get instead.
+
+    Textual dispatches on_mount/on_resize down the MRO, so screens mixing this
+    in keep their own handlers.
+    """
+
+    #: Terminal height at or below which the chrome is not affordable.
+    COMPACT_BELOW = 26
+
+    def _sync_compact(self) -> None:
+        try:
+            modal = self.query_one(".modal")
+        except Exception:
+            return
+        modal.set_class(self.app.size.height < self.COMPACT_BELOW, "compact")
+
+    def on_mount(self) -> None:
+        self._sync_compact()
+
+    def on_resize(self, event) -> None:
+        self._sync_compact()
+
+
 class PasscodeScreen(ModalScreen[str | None]):
     """Ask for the vault passcode, optionally confirming it for a new vault."""
 
@@ -186,7 +217,7 @@ class TextPromptScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-class HostFormScreen(ModalScreen[Host | None]):
+class HostFormScreen(CompactOnSmall, ModalScreen[Host | None]):
     """Add or edit a host."""
 
     BINDINGS = [
@@ -372,7 +403,7 @@ class HostFormScreen(ModalScreen[Host | None]):
         self.dismiss(None)
 
 
-class CredentialFormScreen(ModalScreen[Credential | None]):
+class CredentialFormScreen(CompactOnSmall, ModalScreen[Credential | None]):
     """Add or edit a vault credential."""
 
     BINDINGS = [
@@ -525,7 +556,7 @@ class ListPickerScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-class HelpScreen(ModalScreen[None]):
+class HelpScreen(CompactOnSmall, ModalScreen[None]):
     """Key and command reference."""
 
     BINDINGS = [Binding("escape,f1,q", "dismiss_none", "Close")]
