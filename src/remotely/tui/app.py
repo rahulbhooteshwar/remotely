@@ -23,6 +23,7 @@ from .. import __version__, config
 from ..completion import Completion, CompletionEngine, find_command, parse
 from ..importexport import TransferError, export_hosts, import_hosts
 from ..models import Credential, Host
+from .. import settings as settings_module
 from ..sessions import Session, SessionManager
 from ..store import HostStore, StoreError
 from ..themes import ThemeRegistry
@@ -153,6 +154,7 @@ class RemotelyApp(App[None]):
         self.vault = vault or Vault()
         self.themes = themes or ThemeRegistry()
         self.sessions = sessions or SessionManager()
+        self.settings = settings_module.load()
         self.engine = CompletionEngine(
             hosts=lambda: self.store.hosts,
             tags=lambda: self.store.tags(),
@@ -502,6 +504,7 @@ class RemotelyApp(App[None]):
             "close": lambda: self._close_by_name(argument),
             "themes": self.action_themes,
             "vault": self.action_vault,
+            "settings": self.action_settings,
             "lock": self._lock_vault,
             "export": lambda: self._export(argument),
             "import": lambda: self._import(argument),
@@ -620,7 +623,7 @@ class RemotelyApp(App[None]):
 
     @on(SessionTab.CloseRequested)
     def _on_tab_close_clicked(self, event: SessionTab.CloseRequested) -> None:
-        self._close_session(event.tab_id)
+        self._request_close(event.tab_id)
 
     def action_close_tab(self) -> None:
         """Close the session on the current tab."""
@@ -628,7 +631,30 @@ class RemotelyApp(App[None]):
         if not current or current == LAUNCHER_TAB:
             self._status("No session tab is selected.")
             return
-        self._close_session(current)
+        self._request_close(current)
+
+    @work
+    async def _request_close(self, session_id: str) -> None:
+        """Close a tab, confirming first when the preference asks for it.
+
+        A dead session has nothing left to lose, so it closes straight away
+        regardless - confirming there would be pure nagging.
+        """
+        session = self.sessions.get(session_id)
+        if session is None:
+            return
+        if self.settings.confirm_close_tab and session.is_live:
+            confirmed = await self.push_screen_wait(
+                ConfirmScreen(
+                    f"Close the session to {session.host_name}?",
+                    detail="The connection will be dropped. "
+                    "Turn this prompt off in /settings.",
+                    confirm_label="Close",
+                )
+            )
+            if not confirmed:
+                return
+        self._close_session(session_id)
 
     # --------------------------------------------------------------- connecting
 
@@ -713,8 +739,7 @@ class RemotelyApp(App[None]):
             self._status(f"No open session for {name!r}.", error=True)
             return
         for session in matches:
-            self._close_session(session.id)
-        self._status(f"Closed {len(matches)} session(s) for [b]{name}[/b].")
+            self._request_close(session.id)
 
     def _close_session(self, session_id: str) -> None:
         session = self.sessions.get(session_id)
@@ -957,6 +982,19 @@ class RemotelyApp(App[None]):
         if choice is None:
             return
         if choice == "!closeall":
+            live = [s for s in sessions if s.is_live]
+            # One prompt for the batch, not one per session.
+            if self.settings.confirm_close_tab and live:
+                confirmed = await self.push_screen_wait(
+                    ConfirmScreen(
+                        f"Close all {len(sessions)} sessions?",
+                        detail=f"{len(live)} are still connected. "
+                        "Turn this prompt off in /settings.",
+                        confirm_label="Close all",
+                    )
+                )
+                if not confirmed:
+                    return
             for session in list(sessions):
                 self._close_session(session.id)
             self._status("Closed all sessions.")
@@ -1049,9 +1087,67 @@ class RemotelyApp(App[None]):
 
     # ------------------------------------------------------------------ closing
 
-    def action_quit(self) -> None:
+    @work
+    async def action_quit(self) -> None:
+        """Quit, confirming first when sessions would be lost.
+
+        Sessions live in this process, so quitting drops every one of them -
+        which is exactly why this is worth asking about.
+        """
+        live = self.sessions.live()
+        if self.settings.confirm_quit and live:
+            names = ", ".join(sorted({s.host_name for s in live})[:4])
+            more = "" if len(live) <= 4 else f" and {len(live) - 4} more"
+            confirmed = await self.push_screen_wait(
+                ConfirmScreen(
+                    f"Quit and close {len(live)} open session"
+                    f"{'s' if len(live) != 1 else ''}?",
+                    detail=f"{names}{more}. Sessions do not survive quitting. "
+                    "Turn this prompt off in /settings.",
+                    confirm_label="Quit",
+                )
+            )
+            if not confirmed:
+                return
         self.sessions.close_all()
         self.exit()
+
+    @work
+    async def action_settings(self) -> None:
+        """Preferences, toggled from the palette."""
+        while True:
+            rows = [
+                Option(
+                    f"[b]{label}[/b]   "
+                    f"{'[green]on[/green]' if getattr(self.settings, name) else '[dim]off[/dim]'}"
+                    f"\n    [dim]{help_text}[/dim]",
+                    id=name,
+                )
+                for name, (label, help_text) in settings_module.LABELS.items()
+            ]
+            choice = await self.push_screen_wait(
+                ListPickerScreen(
+                    "Settings",
+                    rows,
+                    help_text=(
+                        "Select a preference to toggle it. "
+                        f"Stored in {config.settings_file()}."
+                    ),
+                )
+            )
+            if choice is None or choice.startswith("!"):
+                return
+            try:
+                new_value = self.settings.toggle(choice)
+            except KeyError:
+                continue
+            try:
+                settings_module.save(self.settings)
+            except OSError as exc:
+                self._status(f"Could not save settings: {exc}", error=True)
+                return
+            label = settings_module.LABELS[choice][0]
+            self._status(f"{label}: {'on' if new_value else 'off'}.")
 
 
 def run(**kwargs: Any) -> None:

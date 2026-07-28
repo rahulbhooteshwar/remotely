@@ -668,3 +668,167 @@ async def test_left_click_drag_actually_selects_text() -> None:
         assert selected, "dragging produced no selection"
         assert "HELLO-SELECT" in selected
         app.sessions.close_all()
+
+
+# ----------------------------------------------------------------- confirmations
+
+
+async def test_declining_the_quit_prompt_keeps_the_app_running() -> None:
+    """The prompt has to actually prevent the quit, not just appear."""
+    from remotely.tui.screens import ConfirmScreen
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.live():
+                break
+        assert app.sessions.live()
+
+        app.action_quit()
+        for _ in range(20):
+            await pilot.pause()
+            if isinstance(app.screen, ConfirmScreen):
+                break
+        assert isinstance(app.screen, ConfirmScreen), "no confirmation was shown"
+
+        app.screen.dismiss(False)
+        for _ in range(20):
+            await pilot.pause()
+        assert app.is_running, "app quit despite the prompt being declined"
+        assert app.sessions.live(), "sessions were closed despite declining"
+        app.sessions.close_all()
+
+
+async def test_quitting_without_sessions_does_not_nag() -> None:
+    """Nothing is at risk, so there is nothing to confirm."""
+    from remotely.tui.screens import ConfirmScreen
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert not app.sessions.live()
+        app.action_quit()
+        for _ in range(10):
+            await pilot.pause()
+        assert not isinstance(app.screen, ConfirmScreen)
+
+
+async def test_quit_prompt_can_be_turned_off() -> None:
+    from remotely.tui.screens import ConfirmScreen
+
+    app = build_app()
+    app.settings.confirm_quit = False
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.live():
+                break
+        app.action_quit()
+        for _ in range(10):
+            await pilot.pause()
+        assert not isinstance(app.screen, ConfirmScreen)
+
+
+async def test_declining_the_close_prompt_keeps_the_tab() -> None:
+    from remotely.tui.screens import ConfirmScreen
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.live():
+                break
+        session = app.sessions.live()[0]
+
+        app._request_close(session.id)
+        for _ in range(20):
+            await pilot.pause()
+            if isinstance(app.screen, ConfirmScreen):
+                break
+        assert isinstance(app.screen, ConfirmScreen), "no confirmation was shown"
+
+        app.screen.dismiss(False)
+        for _ in range(20):
+            await pilot.pause()
+        assert app.sessions.get(session.id) is not None, "tab closed despite declining"
+        app.sessions.close_all()
+
+
+async def test_accepting_the_close_prompt_closes_the_tab() -> None:
+    from remotely.tui.screens import ConfirmScreen
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.live():
+                break
+        session = app.sessions.live()[0]
+
+        app._request_close(session.id)
+        for _ in range(20):
+            await pilot.pause()
+            if isinstance(app.screen, ConfirmScreen):
+                break
+        app.screen.dismiss(True)
+        for _ in range(30):
+            await pilot.pause()
+            if app.sessions.get(session.id) is None:
+                break
+        assert app.sessions.get(session.id) is None
+        app.sessions.close_all()
+
+
+async def test_closing_a_dead_tab_does_not_prompt() -> None:
+    """A finished session has nothing left to lose."""
+    from remotely.tui.screens import ConfirmScreen
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._connect("prod-web")
+        for _ in range(200):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        session = app.sessions.list()[0]
+        session.status = "closed"
+
+        app._request_close(session.id)
+        for _ in range(20):
+            await pilot.pause()
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert app.sessions.get(session.id) is None
+
+
+async def test_settings_command_persists_a_toggle() -> None:
+    from remotely import settings as settings_module
+    from remotely.tui.screens import ListPickerScreen
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app.settings.confirm_quit is True
+
+        app._run_command("settings", "")
+        for _ in range(20):
+            await pilot.pause()
+            if isinstance(app.screen, ListPickerScreen):
+                break
+        assert isinstance(app.screen, ListPickerScreen), "settings list did not open"
+
+        app.screen.dismiss("confirm_quit")
+        for _ in range(20):
+            await pilot.pause()
+
+        assert app.settings.confirm_quit is False
+        assert settings_module.load().confirm_quit is False, "toggle was not persisted"

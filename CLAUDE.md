@@ -52,6 +52,10 @@ Layered, TUI at the top, no upward dependencies:
 - **`sessions.py`** — `Session` (transport + emulator + status) and
   `SessionManager`. No Textual imports either.
 - **`completion.py`** — command-bar parsing and fuzzy ranking. Also Textual-free.
+- **`settings.py`** — user preferences (`~/.remotely/settings.json`), separate
+  from `hosts.json` so a corrupt or unrecognised preference can never take the
+  host list down with it — anything unreadable falls back to defaults. Toggled
+  from `/settings`.
 - **`tui/`** — the Textual app, the `TerminalPane` widget, modal screens.
 
 ### How a session works

@@ -171,10 +171,10 @@ The input at the top is the only control surface. It completes as you type.
 ```
 /connect <host>   connect to a host        /themes          browse and clone themes
 /add              add a host               /vault           manage credentials
-/edit <host>      edit a host              /lock            lock the vault
-/delete <host>    delete a host            /export <path>   export hosts
-/sessions         list open sessions       /import <path>   import hosts
-/close [host]     close a tab
+/edit <host>      edit a host              /settings        change preferences
+/delete <host>    delete a host            /lock            lock the vault
+/sessions         list open sessions       /export <path>   export hosts
+/close [host]     close a tab              /import <path>   import hosts
 /help  /quit
 ```
 
@@ -185,6 +185,7 @@ Everything lives in `~/.remotely`:
 ```
 ~/.remotely/
 ├── hosts.json      host definitions - never contains secrets
+├── settings.json   preferences (confirmation prompts, etc.), set via /settings
 ├── vault.enc       encrypted credentials
 ├── known_hosts     host keys Remotely has learned
 └── themes/         your own themes, override bundled ones by name
@@ -192,6 +193,10 @@ Everything lives in `~/.remotely`:
 
 Because `hosts.json` holds no secrets, it is safe to diff, sync, or commit.
 Use `--config DIR` or `REMOTELY_HOME` to point somewhere else.
+
+`/settings` toggles things like "confirm before quitting" and "confirm before
+closing a tab" - both on by default so a stray `Ctrl+Q` or tab close can't
+drop a live session by accident.
 
 ## Credentials
 

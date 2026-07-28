@@ -45,6 +45,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("close", "Close this tab, or a host's sessions", "host", "[host]"),
     Command("themes", "Browse, preview and clone themes", "theme", "[theme]"),
     Command("vault", "Manage stored credentials", aliases=("creds",)),
+    Command("settings", "Change preferences", aliases=("prefs", "preferences")),
     Command("lock", "Lock the credential vault"),
     Command("export", "Export hosts to a file", "path", "<path>"),
     Command("import", "Import hosts from a file", "path", "<path>"),

@@ -572,6 +572,7 @@ class HelpScreen(ModalScreen[None]):
   /close [host]    close this tab, or a host's sessions
   /themes          browse and clone themes
   /vault           manage credentials
+  /settings        change preferences (confirmation prompts, etc.)
   /lock            lock the vault
   /export <path>   export hosts    (add --secrets to include credentials)
   /import <path>   import hosts    (add --replace to overwrite everything)
