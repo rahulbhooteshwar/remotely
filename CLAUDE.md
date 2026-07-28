@@ -58,6 +58,13 @@ Layered, TUI at the top, no upward dependencies:
   host list down with it — anything unreadable falls back to defaults. Toggled
   from `/settings`.
 - **`tui/`** — the Textual app, the `TerminalPane` widget, modal screens.
+- **`tui/results.py`** — the launcher's host tiles, group boxes and completion
+  rows. Built from real widgets rather than an `OptionList` because a row needs
+  clickable *regions*: the tile launches, each icon at its right edge does
+  something else. Letting every icon be its own widget means Textual owns the
+  layout, so the clickable area cannot drift out of step with the drawing —
+  which is exactly the bug that made the tab close control fire on the wrong
+  cells.
 
 ### How a session works
 
@@ -188,6 +195,22 @@ session tab is active, via `_sync_banner_visibility()` — called from both
 `_switch_to()` and the `Tabs.TabActivated` handler, which are the only two ways
 the visible tab changes. A successful connect deliberately writes **no** status
 line; only `session.notes` (warnings) surface there.
+
+### The launcher list
+
+There is no permanent detail pane; details open from a tile's `◉` icon into
+`HostDetailScreen`, and the list gets the full width. Two consequences to keep
+in mind:
+
+- **Navigation state lives on the app**, not in a widget: `_nav` (row ids in
+  *visual* order), `_nav_index`, and `_rows`. Search hoists host tiles above
+  non-host completion rows, so `_nav` has to be built in that same order or the
+  arrow keys walk a different list from the one on screen.
+- `_selected_host` is updated by `_highlight()`, and it is what `ctrl+e` /
+  `ctrl+d` act on from the launcher.
+
+`IconButton._on_click` must call `event.stop()`. Clicks bubble, so without it
+every icon press would also reach the tile underneath and open a session.
 
 ### The tab row
 

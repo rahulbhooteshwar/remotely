@@ -37,32 +37,108 @@ Screen {
 #body {
     height: 1fr;
     margin: 1 1 0 1;
+    scrollbar-size-vertical: 1;
 }
 
 #launcher {
     height: 100%;
 }
 
+/* One full-width column of grouped tiles. */
 #results {
-    width: 2fr;
+    width: 100%;
+    height: auto;
+}
+
+.empty-note {
+    padding: 1 2;
+    color: #8b98b0;
+}
+
+/* Each group is its own box, so where one ends and the next begins is a
+   border rather than a guess. */
+.group-box {
+    width: 100%;
+    height: auto;
     border: round #2a3446;
+    border-title-color: #7aa2f7;
+    border-title-style: bold;
+    border-subtitle-color: #5c6a82;
     background: #0d1117;
-    padding: 0 1;
-    scrollbar-size-vertical: 1;
+    margin-bottom: 1;
 }
 
-#results:focus {
-    border: round #2a3446;
+/* Two rows per host: name and target, then tags. Alternating fills plus the
+   theme stripe on the left edge make one row easy to tell from the next
+   without spending a row on a separator. */
+.host-tile {
+    width: 100%;
+    height: 2;
+    background: #0d1117;
+    pointer: pointer;
 }
 
-#detail-pane {
+.host-tile.alt {
+    background: #131a24;
+}
+
+.host-tile:hover {
+    background: #1c2534;
+}
+
+.host-tile.-highlight {
+    background: #24304a;
+}
+
+.tile-body {
+    width: 100%;
+    height: 2;
+}
+
+.tile-text {
     width: 1fr;
-    border: round #2a3446;
-    background: #0d1117;
+    height: 2;
     padding: 0 1;
-    margin-left: 1;
-    scrollbar-size-vertical: 1;
 }
+
+.tile-line {
+    width: 100%;
+    height: 1;
+}
+
+/* Fixed width so the icons line up down the list; each is its own widget, so
+   the clickable area and the glyph can never drift apart. */
+.tile-actions {
+    width: 12;
+    height: 2;
+}
+
+.tile-icon {
+    width: 3;
+    height: 2;
+    content-align: center middle;
+    color: #6b7a94;
+}
+
+.tile-icon:hover {
+    color: #cddcff;
+    background: #33415c;
+}
+
+.completion-row {
+    width: 100%;
+    height: 1;
+    padding: 0 1;
+}
+
+.completion-row:hover {
+    background: #1c2534;
+}
+
+.completion-row.-highlight {
+    background: #24304a;
+}
+
 
 #status {
     height: auto;

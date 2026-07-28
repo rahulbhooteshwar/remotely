@@ -556,12 +556,49 @@ class ListPickerScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class HostDetailScreen(CompactOnSmall, ModalScreen[None]):
+    """Everything known about one host.
+
+    This used to be a permanent right-hand column. It earned its space only
+    when you were looking at it, so it moved behind the tile's details icon and
+    the list got the width back.
+    """
+
+    BINDINGS = [Binding("escape,q", "dismiss_none", "Close")]
+
+    def __init__(self, title: str, body: str) -> None:
+        super().__init__()
+        self.title_text = title
+        self.body = body
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal modal-wide"):
+            yield Label(self.title_text, classes="modal-title")
+            with VerticalScroll(classes="form-scroll"):
+                yield Static(self.body, id="detail-body")
+            with Horizontal(classes="modal-buttons"):
+                yield Button("Close", variant="primary", id="cancel")
+
+    @on(Button.Pressed, "#cancel")
+    def _close(self) -> None:
+        self.dismiss(None)
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
 class HelpScreen(CompactOnSmall, ModalScreen[None]):
     """Key and command reference."""
 
     BINDINGS = [Binding("escape,f1,q", "dismiss_none", "Close")]
 
     HELP = """\
+[b]Launcher[/b]
+  Hosts are grouped into boxes, two rows each: name and target, then tags.
+  Click a tile to connect. The icons on its right edge do the rest:
+    \u29c9  copy the host name       \u270e  edit the host
+    \u276f  copy user@host           \u25c9  view full details
+
 [b]Command bar[/b]
   type anything    fuzzy search hosts by name, hostname, user, group or tag
   /                commands

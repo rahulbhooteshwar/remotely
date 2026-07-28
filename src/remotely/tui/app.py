@@ -17,7 +17,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.widgets import ContentSwitcher, Footer, Input, OptionList, Static, Tabs, Tab
+from textual.widgets import ContentSwitcher, Footer, Input, Static, Tabs, Tab
 from textual.widgets.option_list import Option
 
 from .. import __version__, config
@@ -34,6 +34,7 @@ from .screens import (
     ConfirmScreen,
     CredentialFormScreen,
     HelpScreen,
+    HostDetailScreen,
     HostFormScreen,
     ListPickerScreen,
     PasscodeScreen,
@@ -42,6 +43,7 @@ from .screens import (
     session_options,
     theme_options,
 )
+from .results import ACTIONS, CompletionRow, GroupBox, HostTile
 from .terminal import TerminalPane
 
 LAUNCHER_TAB = "launcher"
@@ -307,6 +309,8 @@ class RemotelyApp(App[None]):
             themes=lambda: self.themes.names(),
         )
         self._rows: dict[str, Completion] = {}
+        self._nav: list[str] = []
+        self._nav_index: int | None = None
         self._selected_host: Host | None = None
 
     # ------------------------------------------------------------------ layout
@@ -323,10 +327,10 @@ class RemotelyApp(App[None]):
                         ),
                         id="command-bar",
                     )
-                    with Horizontal(id="body"):
-                        yield OptionList(id="results")
-                        with VerticalScroll(id="detail-pane"):
-                            yield Static("", id="detail")
+                    # One full-width column. Details used to live in a
+                    # permanent right-hand pane; it now opens from a tile.
+                    with VerticalScroll(id="body"):
+                        yield Vertical(id="results")
             yield Static("", id="status")
         yield Footer()
 
@@ -418,111 +422,158 @@ class RemotelyApp(App[None]):
 
     # ----------------------------------------------------------------- results
 
+    def _results(self) -> Vertical:
+        return self.query_one("#results", Vertical)
+
     def _refresh_results(self) -> None:
         if not self._dom_alive():
             return
         text = self.query_one("#command-bar", CommandBar).value
-        results = self.query_one("#results", OptionList)
-        results.clear_options()
+        container = self._results()
+        container.remove_children()
+
         self._rows = {}
+        self._nav: list[str] = []
 
-        options: list[Option] = []
         if not text.strip():
-            options = self._grouped_host_options()
+            widgets = self._grouped_host_widgets()
         else:
-            for index, completion in enumerate(self.engine.complete(text)):
-                option_id = f"{completion.kind}:{index}:{completion.value}"
-                self._rows[option_id] = completion
-                options.append(Option(self._render_completion(completion), id=option_id))
+            widgets = self._completion_widgets(self.engine.complete(text))
 
-        if options:
-            results.add_options(options)
-            self._highlight_first_selectable()
-        else:
-            results.add_options([Option("[dim]No matches[/dim]", disabled=True)])
-            self._update_detail(None)
+        if not widgets:
+            container.mount(
+                Static("[dim]No matches[/dim]", classes="empty-note")
+            )
+            self._nav_index = None
+            self._selected_host = None
+            return
 
-    def _grouped_host_options(self) -> list[Option]:
-        options: list[Option] = []
+        for widget in widgets:
+            container.mount(widget)
+        self._nav_index = None
+        self._highlight(0)
+
+    def _grouped_host_widgets(self) -> list:
         groups = self.store.groups()
         if not groups:
             return [
-                Option(
+                Static(
                     "[dim]No hosts yet. Press ctrl+n or type /add to create one.[/dim]",
-                    disabled=True,
+                    classes="empty-note",
                 )
             ]
+        boxes = []
         for group, hosts in groups.items():
-            options.append(Option(f"[b]{group}[/b] [dim]({len(hosts)})[/dim]", disabled=True))
+            tiles = []
             for index, host in enumerate(hosts):
-                completion = CompletionEngine._host_completion(host)
-                option_id = f"host:{group}:{index}:{host.name}"
-                self._rows[option_id] = completion
-                options.append(
-                    Option(self._render_completion(completion, indent=True), id=option_id)
-                )
-        return options
+                row_id = f"host:{group}:{index}:{host.name}"
+                self._rows[row_id] = CompletionEngine._host_completion(host)
+                self._nav.append(row_id)
+                tiles.append(self._make_tile(host, row_id, index))
+            boxes.append(GroupBox(group, *tiles))
+        return boxes
 
-    def _render_completion(self, completion: Completion, *, indent: bool = False) -> str:
-        pad = "  " if indent else ""
-        if completion.kind == "host":
-            host = self.store.get(completion.value)
-            theme = self.themes.get(host.theme if host else None)
-            marker = f"[{theme.accent}]{theme.icon}[/]"
-            live = len(self.sessions.for_host(completion.value)) if host else 0
-            badge = f" [dim]({live} open)[/dim]" if live else ""
-            return (
-                f"{pad}{marker} [b]{completion.label}[/b]{badge}  "
-                f"[dim]{completion.description}[/dim]"
-            )
-        icons = {"command": "›", "tag": "@", "group": "#", "theme": "◈", "path": "…"}
-        icon = icons.get(completion.kind, "•")
-        return f"{pad}[dim]{icon}[/dim] [b]{completion.label}[/b]  [dim]{completion.description}[/dim]"
+    def _make_tile(self, host: Host, row_id: str, index: int) -> HostTile:
+        tile = HostTile(
+            host,
+            self.themes.get(host.theme),
+            open_sessions=len(self.sessions.for_host(host.name)),
+            alternate=bool(index % 2),
+        )
+        tile.id = self._widget_id(row_id)
+        return tile
 
-    def _highlight_first_selectable(self) -> None:
-        results = self.query_one("#results", OptionList)
-        for index in range(results.option_count):
-            if not results.get_option_at_index(index).disabled:
-                results.highlighted = index
-                return
-        results.highlighted = None
+    def _completion_widgets(self, completions) -> list:
+        """Search results: hosts stay tiles, everything else is a plain row.
+
+        Hosts are hoisted above the rest, so the navigation order is built the
+        same way - arrow keys have to walk the list you can see, not the order
+        the engine happened to return.
+        """
+        tiles: list[HostTile] = []
+        host_ids: list[str] = []
+        rows: list = []
+        other_ids: list[str] = []
+
+        for index, completion in enumerate(completions):
+            row_id = f"{completion.kind}:{index}:{completion.value}"
+            if completion.kind == "host":
+                host = self.store.get(completion.value)
+                if host is None:
+                    continue
+                self._rows[row_id] = completion
+                host_ids.append(row_id)
+                tiles.append(self._make_tile(host, row_id, len(tiles)))
+            else:
+                self._rows[row_id] = completion
+                other_ids.append(row_id)
+                row = CompletionRow(row_id, self._render_completion(completion))
+                row.id = self._widget_id(row_id)
+                rows.append(row)
+
+        self._nav.extend(host_ids + other_ids)
+        widgets: list = []
+        if tiles:
+            widgets.append(GroupBox("Matches", *tiles))
+        widgets.extend(rows)
+        return widgets
+
+    @staticmethod
+    def _widget_id(row_id: str) -> str:
+        """A DOM-safe id for a row key."""
+        safe = "".join(c if c.isalnum() else "-" for c in row_id)
+        return f"row-{safe}"
+
+    def _render_completion(self, completion: Completion) -> str:
+        icons = {"command": "\u203a", "tag": "@", "group": "#", "theme": "\u25c8", "path": "\u2026"}
+        icon = icons.get(completion.kind, "\u2022")
+        return (
+            f"[dim]{icon}[/dim] [b]{completion.label}[/b]  "
+            f"[dim]{completion.description}[/dim]"
+        )
+
+    # ------------------------------------------------------------- navigation
+
+    def _nav_widget(self, row_id: str):
+        try:
+            return self.query_one(f"#{self._widget_id(row_id)}")
+        except NoMatches:
+            return None
+
+    def _highlight(self, index: int | None) -> None:
+        """Move the highlight, which is what enter and ctrl+e act on."""
+        for row_id in self._nav:
+            widget = self._nav_widget(row_id)
+            if widget is not None:
+                widget.remove_class("-highlight")
+
+        if index is None or not self._nav:
+            self._nav_index = None
+            self._selected_host = None
+            return
+
+        index = max(0, min(len(self._nav) - 1, index))
+        self._nav_index = index
+        row_id = self._nav[index]
+        widget = self._nav_widget(row_id)
+        if widget is not None:
+            widget.add_class("-highlight")
+            widget.scroll_visible(animate=False)
+
+        completion = self._rows.get(row_id)
+        self._selected_host = (
+            self.store.get(completion.value)
+            if completion is not None and completion.kind == "host"
+            else None
+        )
 
     def _highlighted_completion(self) -> Completion | None:
-        results = self.query_one("#results", OptionList)
-        index = results.highlighted
-        if index is None:
+        if self._nav_index is None or self._nav_index >= len(self._nav):
             return None
-        try:
-            option = results.get_option_at_index(index)
-        except Exception:
-            return None
-        if option.id is None:
-            return None
-        return self._rows.get(option.id)
+        return self._rows.get(self._nav[self._nav_index])
 
-    def _update_detail(self, completion: Completion | None) -> None:
-        detail = self.query_one("#detail", Static)
-        if completion is None:
-            detail.update("")
-            self._selected_host = None
-            return
-
-        if completion.kind != "host":
-            self._selected_host = None
-            body = f"[b]{completion.label}[/b]\n\n{completion.description}"
-            if completion.kind == "command":
-                command = find_command(completion.value)
-                if command is not None:
-                    body += f"\n\n[dim]usage:[/dim] {command.usage}"
-            detail.update(body)
-            return
-
-        host = self.store.get(completion.value)
-        self._selected_host = host
-        if host is None:
-            detail.update("")
-            return
-
+    def _host_detail_body(self, host: Host) -> str:
+        """The long-form description shown by the details icon."""
         theme = self.themes.get(host.theme)
         if host.auth_mode == "credential":
             auth = f"credential [b]{host.credential}[/b]"
@@ -531,7 +582,6 @@ class RemotelyApp(App[None]):
         else:
             auth = "ssh agent / default keys"
 
-        client = "system ssh" if host.use_system_ssh else "built-in"
         options = host.ssh_options
         if options is None:
             options_text = "[dim]defaults[/dim]"
@@ -542,15 +592,13 @@ class RemotelyApp(App[None]):
 
         open_count = len(self.sessions.for_host(host.name))
         lines = [
-            f"[b]{host.name}[/b]",
-            "",
             f"[dim]target[/dim]   {host.target}",
             f"[dim]port[/dim]     {host.port}",
             f"[dim]group[/dim]    {host.group}",
             f"[dim]tags[/dim]     {' '.join('@' + t for t in host.tags) or '[dim]none[/dim]'}",
             f"[dim]theme[/dim]    [{theme.accent}]{theme.icon} {theme.name}[/]",
             f"[dim]auth[/dim]     {auth}",
-            f"[dim]client[/dim]   {client}",
+            f"[dim]client[/dim]   {'system ssh' if host.use_system_ssh else 'built-in'}",
         ]
         if open_count:
             lines.append(f"[dim]open[/dim]     {open_count} session(s)")
@@ -565,7 +613,7 @@ class RemotelyApp(App[None]):
 
         if host.description:
             lines += ["", f"[dim]{host.description}[/dim]"]
-        detail.update("\n".join(lines))
+        return "\n".join(lines)
 
     # ------------------------------------------------------------- input events
 
@@ -573,34 +621,45 @@ class RemotelyApp(App[None]):
     def _on_changed(self) -> None:
         self._refresh_results()
 
-    @on(OptionList.OptionHighlighted, "#results")
-    def _on_highlight(self, event: OptionList.OptionHighlighted) -> None:
-        option_id = event.option.id
-        self._update_detail(self._rows.get(option_id) if option_id else None)
-
     @on(CommandBar.Navigate)
     def _on_navigate(self, event: CommandBar.Navigate) -> None:
-        results = self.query_one("#results", OptionList)
-        if results.option_count == 0:
+        if not self._nav:
             return
-        current = results.highlighted if results.highlighted is not None else -1
-        step = 1 if event.delta > 0 else -1
-        target = current
-        for _ in range(abs(event.delta)):
-            probe = target
-            while True:
-                probe += step
-                if probe < 0 or probe >= results.option_count:
-                    probe = None
-                    break
-                if not results.get_option_at_index(probe).disabled:
-                    break
-            if probe is None:
-                break
-            target = probe
-        if target != current:
-            results.highlighted = target
-            results.scroll_to_highlight()
+        current = self._nav_index if self._nav_index is not None else -1
+        self._highlight(current + event.delta)
+
+    @on(HostTile.Launch)
+    def _on_tile_launch(self, event: HostTile.Launch) -> None:
+        self._connect(event.host_name)
+
+    @on(HostTile.Action)
+    def _on_tile_action(self, event: HostTile.Action) -> None:
+        self._tile_action(event.host_name, event.action)
+
+    @on(CompletionRow.Chosen)
+    def _on_row_chosen(self, event: CompletionRow.Chosen) -> None:
+        completion = self._rows.get(event.row_id)
+        if completion is not None:
+            self._activate(completion)
+
+    def _tile_action(self, host_name: str, action: str) -> None:
+        host = self.store.get(host_name)
+        if host is None:
+            self._status(f"No host named {host_name!r}.", error=True)
+            return
+        if action == "copy-name":
+            self.copy_to_clipboard(host.name)
+            self._status(f"Copied [b]{host.name}[/b] to the clipboard.")
+        elif action == "copy-target":
+            target = f"{host.username}@{host.hostname}" if host.username else host.hostname
+            self.copy_to_clipboard(target)
+            self._status(f"Copied [b]{target}[/b] to the clipboard.")
+        elif action == "edit":
+            self._edit_host(host.name)
+        elif action == "details":
+            self.push_screen(
+                HostDetailScreen(host.name, self._host_detail_body(host))
+            )
 
     @on(CommandBar.Accept)
     def _on_accept(self) -> None:
@@ -617,13 +676,6 @@ class RemotelyApp(App[None]):
         if bar.value:
             bar.value = ""
         self._status("")
-
-    @on(OptionList.OptionSelected, "#results")
-    def _on_option_selected(self, event: OptionList.OptionSelected) -> None:
-        option_id = event.option.id
-        completion = self._rows.get(option_id) if option_id else None
-        if completion is not None:
-            self._activate(completion)
 
     @on(Input.Submitted, "#command-bar")
     def _on_submitted(self) -> None:

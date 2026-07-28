@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from remotely.tui.app import CommandBar, RemotelyApp
-from textual.widgets import OptionList
 
 from .conftest import make_host
 
@@ -22,14 +21,21 @@ def build_app() -> RemotelyApp:
 
 
 async def test_idle_view_lists_hosts_by_group() -> None:
+    """Each group is its own titled box; each host a two-row tile inside it."""
+    from remotely.tui.results import GroupBox, HostTile
+
     app = build_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        results = app.query_one("#results", OptionList)
-        # 2 group headers + 3 hosts
-        assert results.option_count == 5
-        # Headers are not selectable.
-        assert results.get_option_at_index(0).disabled
+        boxes = list(app.query(GroupBox))
+        titles = {str(box.border_title).strip() for box in boxes}
+        assert titles == {"Production", "Personal"}
+
+        tiles = list(app.query(HostTile))
+        assert {tile.host.name for tile in tiles} == {"prod-web", "prod-db", "laptop"}
+        # The group heading is a border, not a row you can land on.
+        assert all(row.startswith("host:") for row in app._nav)
+        assert len(app._nav) == 3
 
 
 async def test_typing_filters_to_matching_hosts() -> None:
@@ -57,13 +63,18 @@ async def test_tag_filter() -> None:
 
 
 async def test_no_match_shows_placeholder() -> None:
+    from remotely.tui.results import GroupBox, HostTile
+
     app = build_app()
     async with app.run_test() as pilot:
         app.query_one("#command-bar", CommandBar).value = "zzzzzz"
         await pilot.pause()
-        results = app.query_one("#results", OptionList)
-        assert results.option_count == 1
-        assert results.get_option_at_index(0).disabled
+        assert not list(app.query(HostTile))
+        assert not list(app.query(GroupBox))
+        assert app.query_one(".empty-note")
+        # Nothing to land on, so nothing is highlighted.
+        assert app._nav == []
+        assert app._nav_index is None
 
 
 async def test_tab_accepts_highlighted_completion() -> None:
@@ -77,20 +88,144 @@ async def test_tab_accepts_highlighted_completion() -> None:
         assert bar.value == "/connect "
 
 
-async def test_arrow_keys_skip_group_headers() -> None:
+async def test_arrow_keys_move_between_hosts() -> None:
+    """Only hosts are navigable; group titles are chrome and cannot be landed on."""
+    from remotely.tui.results import HostTile
+
     app = build_app()
     async with app.run_test() as pilot:
-        results = app.query_one("#results", OptionList)
         await pilot.pause()
-        first = results.highlighted
-        assert first is not None
-        assert not results.get_option_at_index(first).disabled
+        first = app._nav_index
+        assert first == 0
+        assert app._selected_host is not None
 
         await pilot.press("down")
         await pilot.pause()
-        second = results.highlighted
-        assert second != first
-        assert not results.get_option_at_index(second).disabled
+        assert app._nav_index == first + 1
+        assert app._selected_host is not None
+
+        # Exactly one tile carries the highlight at a time.
+        highlighted = [t for t in app.query(HostTile) if t.has_class("-highlight")]
+        assert len(highlighted) == 1
+        assert highlighted[0].host.name == app._selected_host.name
+
+
+async def test_tile_click_launches_but_icons_do_not() -> None:
+    """The tile is the big target; the icons must not fall through to it."""
+    from remotely.tui.results import HostTile, IconButton
+
+    app = build_app()
+    async with app.run_test(size=(92, 30)) as pilot:
+        await pilot.pause()
+        tile = next(t for t in app.query(HostTile) if t.host.name == "prod-web")
+        icons = list(tile.query(IconButton))
+        assert [i.action for i in icons] == [
+            "copy-name", "copy-target", "edit", "details"
+        ]
+
+        # Copy icons act without launching anything.
+        await pilot.click(icons[0])
+        await pilot.pause()
+        assert app._clipboard == "prod-web"
+        assert not app.sessions.list(), "the copy icon launched a session"
+
+        await pilot.click(icons[1])
+        await pilot.pause()
+        assert "@" in (app._clipboard or ""), app._clipboard
+        assert not app.sessions.list(), "the copy icon launched a session"
+
+        # The tile body does launch.
+        await pilot.click(tile, offset=(4, 0))
+        for _ in range(80):
+            await pilot.pause()
+            if app.sessions.list():
+                break
+        assert len(app.sessions.list()) == 1
+        assert app.sessions.list()[0].host_name == "prod-web"
+        app.sessions.close_all()
+
+
+async def test_copy_icons_copy_the_right_things() -> None:
+    from remotely.tui.results import HostTile, IconButton
+
+    app = RemotelyApp()
+    app.store.add(
+        make_host("box", hostname="10.9.9.9", username="deploy", port=2222,
+                  group="G", tags=[], theme="prod")
+    )
+    async with app.run_test(size=(92, 30)) as pilot:
+        await pilot.pause()
+        icons = {i.action: i for i in app.query(HostTile).first().query(IconButton)}
+
+        await pilot.click(icons["copy-name"])
+        await pilot.pause()
+        assert app._clipboard == "box", "should copy the host record name"
+
+        await pilot.click(icons["copy-target"])
+        await pilot.pause()
+        assert app._clipboard == "deploy@10.9.9.9", "should copy user@host"
+
+
+async def test_details_and_edit_icons_open_their_dialogs() -> None:
+    from remotely.tui.results import HostTile, IconButton
+    from remotely.tui.screens import HostDetailScreen, HostFormScreen
+
+    app = build_app()
+    async with app.run_test(size=(92, 30)) as pilot:
+        await pilot.pause()
+        icons = {i.action: i for i in app.query(HostTile).first().query(IconButton)}
+
+        await pilot.click(icons["details"])
+        for _ in range(25):
+            await pilot.pause()
+        assert isinstance(app.screen, HostDetailScreen)
+        body = app.screen.query_one("#detail-body")
+        text = "".join(seg.text for seg in body.render_line(0))
+        assert text.strip(), "details dialog is empty"
+        app.screen.dismiss(None)
+        for _ in range(25):
+            await pilot.pause()
+
+        await pilot.click(icons["edit"])
+        for _ in range(25):
+            await pilot.pause()
+        assert isinstance(app.screen, HostFormScreen)
+        app.screen.dismiss(None)
+        for _ in range(25):
+            await pilot.pause()
+
+
+async def test_launcher_has_no_permanent_detail_pane() -> None:
+    """Details moved into a dialog; the list gets the full width."""
+    from textual.css.query import NoMatches
+
+    app = build_app()
+    async with app.run_test(size=(92, 30)) as pilot:
+        await pilot.pause()
+        for gone in ("#detail-pane", "#detail"):
+            with pytest.raises(NoMatches):
+                app.query_one(gone)
+
+        results = app.query_one("#results")
+        body = app.query_one("#body")
+        assert results.region.width == body.region.width, "list is not full width"
+
+
+async def test_tiles_alternate_their_background() -> None:
+    """Adjacent rows need to be distinguishable at a glance."""
+    from remotely.tui.results import HostTile
+
+    app = build_app()
+    async with app.run_test(size=(92, 30)) as pilot:
+        await pilot.pause()
+        production = [
+            t for t in app.query(HostTile) if t.host.group == "Production"
+        ]
+        assert len(production) == 2
+        assert production[0].has_class("alt") != production[1].has_class("alt")
+        # And the theme shows as a stripe rather than a glyph in the text.
+        for tile in production:
+            assert tile.styles.border_left[0] not in ("", "none", None)
 
 
 async def test_escape_clears_the_bar() -> None:

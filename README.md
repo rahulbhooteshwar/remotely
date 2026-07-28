@@ -149,6 +149,21 @@ password once in `/vault` and every host that references it follows.
 
 ## Using it
 
+### The launcher
+
+Hosts are grouped into bordered boxes, two rows per host: the name and where it
+connects, then its tags. The stripe down the left edge is the host's theme, so
+production is obvious without reading anything.
+
+Clicking a tile connects. The icons at its right edge do the rest:
+
+| Icon | Action |
+|---|---|
+| `⧉` | copy the host name |
+| `❯` | copy `user@host` |
+| `✎` | edit the host |
+| `◉` | view full details |
+
 ### The command bar
 
 The input at the top is the only control surface. It completes as you type.
