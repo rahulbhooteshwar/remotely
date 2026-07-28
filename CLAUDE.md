@@ -53,6 +53,13 @@ Layered, TUI at the top, no upward dependencies:
 - **`sessions.py`** — `Session` (transport + emulator + status) and
   `SessionManager`. No Textual imports either.
 - **`completion.py`** — command-bar parsing and fuzzy ranking. Also Textual-free.
+  Two limits keep search a filter rather than a list of everything: the
+  scattered-letter tier needs at least `MIN_SUBSEQUENCE_QUERY` characters and
+  a bounded spread (`max_subsequence_gaps`), and `matching_hosts` scores
+  `search_blob` with `subsequence=False`. The blob is name, hostname, user,
+  group and tags concatenated, so a subsequence across it matches letters that
+  never appear together in anything recognisable — "rb" hit every host,
+  because "rahul.bhooteshwar" has an r and a b.
 - **`settings.py`** — user preferences (`~/.remotely/settings.json`), separate
   from `hosts.json` so a corrupt or unrecognised preference can never take the
   host list down with it — anything unreadable falls back to defaults. Toggled

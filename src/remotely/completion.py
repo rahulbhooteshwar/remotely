@@ -85,11 +85,15 @@ class Completion:
 # --------------------------------------------------------------------- scoring
 
 
-def fuzzy_score(query: str, candidate: str) -> int | None:
+def fuzzy_score(query: str, candidate: str, *, subsequence: bool = True) -> int | None:
     """Score ``candidate`` against ``query``; ``None`` when it does not match.
 
     Ranks exact > prefix > word-boundary > substring > subsequence, then prefers
     shorter candidates so "web" ranks "web" above "web-backup-replica".
+
+    ``subsequence=False`` drops the loosest tier. Scattered-letter matching is
+    useful on a short name you are abbreviating, and meaningless across a
+    haystack of unrelated fields glued together - see ``matching_hosts``.
     """
     if not query:
         return 1
@@ -107,13 +111,31 @@ def fuzzy_score(query: str, candidate: str) -> int | None:
         base = 800
     elif query in candidate_lower:
         base = 700
+    elif not subsequence or len(query) < MIN_SUBSEQUENCE_QUERY:
+        return None
     else:
         gaps = _subsequence_gaps(query, candidate_lower)
-        if gaps is None:
+        if gaps is None or gaps > max_subsequence_gaps(query):
             return None
         base = max(300, 600 - gaps * 10)
 
     return base - min(len(candidate_lower), 90)
+
+
+#: Below this, scattered-letter matching is noise: any two letters turn up in
+#: most names, so "rb" matched "PROD JOBS". Short queries must be a substring.
+MIN_SUBSEQUENCE_QUERY = 3
+
+
+def max_subsequence_gaps(query: str) -> int:
+    """How far apart a subsequence match may be spread before it means nothing.
+
+    Unbounded, "mon" matches "Massed cOmpute reNted" and every other host with
+    those letters somewhere - the result list stops being a filter. Scaling
+    with the query keeps genuine abbreviations ("pw01" for "prod-web-01")
+    while rejecting letters found halfway across an unrelated string.
+    """
+    return 2 * len(query) + 4
 
 
 def _subsequence_gaps(query: str, candidate: str) -> int | None:
@@ -213,8 +235,13 @@ class CompletionEngine:
         for host in self._hosts():
             score = fuzzy_score(query, host.name)
             if score is None:
-                # Fall back to the wider haystack, but rank it below name hits.
-                blob_score = fuzzy_score(query, host.search_blob)
+                # Fall back to the wider haystack, but rank it below name hits
+                # and require a real substring there. search_blob is name,
+                # hostname, user, group and tags concatenated, so a subsequence
+                # spanning them matches letters that never appear together in
+                # anything the user would recognise - "rb" hit every host
+                # because "rahul.bhooteshwar" contains an r and a b.
+                blob_score = fuzzy_score(query, host.search_blob, subsequence=False)
                 score = None if blob_score is None else blob_score - 200
             if score is not None:
                 results.append((host, score))

@@ -195,3 +195,56 @@ def test_limit_is_respected() -> None:
     many = [make_host(f"host-{i:03d}") for i in range(100)]
     engine = CompletionEngine(hosts=lambda: many, limit=5)
     assert len(engine.complete("host")) == 5
+
+
+# ------------------------------------------------------- search precision
+
+
+def test_short_queries_require_a_substring() -> None:
+    """Two letters turn up almost everywhere as a subsequence.
+
+    Regression: "rb" matched "PROD JOBS" (and every host whose user was
+    "rahul.bhooteshwar"), so a search returned the whole list.
+    """
+    assert fuzzy_score("rb", "prod jobs") is None
+    assert fuzzy_score("rb", "rb home") is not None
+    assert fuzzy_score("rb", "my-rb-box") is not None
+
+
+def test_scattered_letters_are_rejected_when_too_far_apart() -> None:
+    assert fuzzy_score("mon", "massed compute rented") is None
+    assert fuzzy_score("mon", "monitoring") is not None
+
+
+def test_real_abbreviations_still_match() -> None:
+    """The loose tier still earns its place for genuine shorthand."""
+    for query in ("pw01", "pw1", "pdb"):
+        assert fuzzy_score(query, "prod-web-01") is not None or query == "pdb"
+    assert fuzzy_score("pdb", "prod-db-01") is not None
+
+
+def test_blob_matches_need_a_substring_not_a_subsequence() -> None:
+    """search_blob glues unrelated fields together.
+
+    A subsequence spanning name, hostname, user, group and tags matches
+    letters that never appear together in anything recognisable.
+    """
+    from remotely.models import Host
+
+    hosts = [
+        Host(name="PROD CACHE", hostname="saas-cache.io",
+             username="rahul.bhooteshwar", port=22, group="PRODUCTION",
+             tags=["cache"], theme="prod"),
+        Host(name="QCAL Prod", hostname="saas-qcal.io",
+             username="rahul.bhooteshwar", port=22, group="PRODUCTION",
+             tags=["qcal"], theme="prod"),
+    ]
+    engine = CompletionEngine(hosts=lambda: hosts)
+
+    names = [h.name for h in engine.matching_hosts("cache")]
+    assert names == ["PROD CACHE"], names
+
+    # A genuine field match still works: hostname, user, group and tags.
+    assert [h.name for h in engine.matching_hosts("qcal")] == ["QCAL Prod"]
+    assert len(engine.matching_hosts("saas")) == 2
+    assert len(engine.matching_hosts("PRODUCTION")) == 2
