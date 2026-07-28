@@ -14,6 +14,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import ContentSwitcher, Footer, Input, OptionList, Static, Tabs, Tab
 from textual.widgets.option_list import Option
@@ -156,7 +157,25 @@ class RemotelyApp(App[None]):
 
     # ------------------------------------------------------------------ chrome
 
+    def _dom_alive(self) -> bool:
+        """Whether the widget tree is still there to update.
+
+        Background workers outlive the widget tree on shutdown - a connection
+        attempt can still be in flight when the user quits - so anything that
+        touches chrome from a worker has to tolerate it being torn down
+        underneath. Without this, quitting mid-connect crashes the worker.
+        """
+        if not self.is_running:
+            return False
+        try:
+            self.query_one("#root")
+        except NoMatches:
+            return False
+        return True
+
     def _refresh_banner(self) -> None:
+        if not self._dom_alive():
+            return
         lock = "[red]locked[/red]" if self.vault.is_locked else "[green]unlocked[/green]"
         if not self.vault.exists():
             lock = "[dim]not created[/dim]"
@@ -170,6 +189,8 @@ class RemotelyApp(App[None]):
         )
 
     def _status(self, message: str, *, error: bool = False) -> None:
+        if not self._dom_alive():
+            return
         widget = self.query_one("#status", Static)
         widget.set_class(error, "error")
         widget.update(message)
@@ -191,6 +212,8 @@ class RemotelyApp(App[None]):
     # ----------------------------------------------------------------- results
 
     def _refresh_results(self) -> None:
+        if not self._dom_alive():
+            return
         text = self.query_one("#command-bar", CommandBar).value
         results = self.query_one("#results", OptionList)
         results.clear_options()
@@ -458,6 +481,8 @@ class RemotelyApp(App[None]):
         action()
 
     def _clear_bar(self) -> None:
+        if not self._dom_alive():
+            return
         self.query_one("#command-bar", CommandBar).value = ""
 
     # ------------------------------------------------------------------- vault
@@ -510,6 +535,8 @@ class RemotelyApp(App[None]):
             tabs.active = tab_id
 
     def action_show_launcher(self) -> None:
+        if not self._dom_alive():
+            return
         self._switch_to(LAUNCHER_TAB)
         self.query_one("#command-bar", CommandBar).focus()
 
@@ -609,6 +636,8 @@ class RemotelyApp(App[None]):
         for _ in range(600):  # up to ~60s, generous for slow bastions
             if session.status != "connecting":
                 break
+            if not self.is_running:
+                return  # quit while connecting; nothing left to report to
             await asyncio.sleep(0.1)
 
         if session.status == "error":

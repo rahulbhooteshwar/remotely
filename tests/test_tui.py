@@ -320,3 +320,49 @@ async def test_passcode_dialog_is_emphasised() -> None:
 
         # The action is named, not a generic OK.
         assert app.screen.query_one("#ok", Button).label.plain == "Unlock"
+
+
+async def test_chrome_updates_are_safe_after_teardown() -> None:
+    """Workers outlive the widget tree, so chrome updates must not crash.
+
+    Regression for a CI-only race: a connection attempt still in flight when
+    the app exits woke up and called query_one('#banner') on a torn-down DOM,
+    failing the worker. The same thing happens in real use if you quit while
+    a host is still connecting.
+    """
+    app = build_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._dom_alive()
+
+    # The app has exited; every chrome path must now be a quiet no-op.
+    assert not app._dom_alive()
+    app._refresh_banner()
+    app._status("late message")
+    app._status("late error", error=True)
+    app._refresh_results()
+    app._clear_bar()
+    app.action_show_launcher()
+
+
+async def test_quitting_mid_connect_does_not_crash_the_watcher() -> None:
+    """Tear down while a connection is still in flight."""
+    from remotely.models import Credential
+    from .conftest import PASSCODE
+
+    app = build_app()
+    app.store.add(
+        make_host("slow", hostname="10.255.255.1", port=9, auth_mode="credential",
+                  credential="pw")
+    )
+    app.vault.initialise(PASSCODE)
+    app.vault.put(Credential(name="pw", kind="password", password="x"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._connect("slow")
+        await pilot.pause()
+        # Leave immediately, with the handshake still outstanding.
+
+    assert not app._dom_alive()
+    app.sessions.close_all()
