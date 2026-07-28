@@ -1827,3 +1827,57 @@ async def test_a_theme_that_no_longer_exists_does_not_stop_startup() -> None:
         await pilot.pause()
         assert app.theme in app.available_themes
         assert app.is_running
+
+
+async def test_export_explains_itself_instead_of_saying_no_matches() -> None:
+    """A path argument has nothing to match; "No matches" read as broken."""
+    app = build_app()
+    async with app.run_test(size=(92, 24)) as pilot:
+        await pilot.pause()
+        bar = app.query_one("#command-bar", CommandBar)
+        bar.value = "/export /nowhere/at/all/x"
+        for _ in range(12):
+            await pilot.pause()
+
+        note = app.query_one(".empty-note")
+        text = " ".join(
+            "".join(seg.text for seg in note.render_line(y))
+            for y in range(note.size.height)
+        )
+        assert "No matches" not in text, text
+        assert "press enter" in text.lower()
+        assert "--secrets" in text
+
+        # A real failed search still says so.
+        bar.value = "zzzzzzz"
+        for _ in range(12):
+            await pilot.pause()
+        note = app.query_one(".empty-note")
+        assert "No matches" in "".join(
+            seg.text for seg in note.render_line(0)
+        )
+
+
+async def test_export_writes_the_file_when_you_press_enter(tmp_path) -> None:
+    """It always worked; the UI just made it look like it would not."""
+    import json
+
+    from textual.widgets import Input
+
+    target = tmp_path / "out" / "hosts.json"
+    target.parent.mkdir()
+
+    app = build_app()
+    async with app.run_test(size=(92, 24)) as pilot:
+        await pilot.pause()
+        bar = app.query_one("#command-bar", CommandBar)
+        bar.value = f"/export {target}"
+        for _ in range(10):
+            await pilot.pause()
+        bar.post_message(Input.Submitted(bar, bar.value))
+        for _ in range(30):
+            await pilot.pause()
+
+    assert target.exists(), "export did not write the file"
+    payload = json.loads(target.read_text())
+    assert {h["name"] for h in payload["hosts"]} == {"prod-web", "prod-db", "laptop"}

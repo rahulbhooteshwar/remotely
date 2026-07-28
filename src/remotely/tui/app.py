@@ -477,9 +477,7 @@ class RemotelyApp(App[None]):
             widgets = self._completion_widgets(self.engine.complete(text))
 
         if not widgets:
-            container.mount(
-                Static("[dim]No matches[/dim]", classes="empty-note")
-            )
+            container.mount(Static(self._empty_note(text), classes="empty-note"))
             self._nav_index = None
             self._selected_host = None
             return
@@ -493,6 +491,26 @@ class RemotelyApp(App[None]):
         # would sit unhighlighted until the user pressed a key.
         self._highlight(0)
         self.call_after_refresh(self._highlight, 0)
+
+    def _empty_note(self, text: str) -> str:
+        """What to say when nothing matched.
+
+        "No matches" is right for a search and wrong for /export, where the
+        argument is a path you are about to create - there is nothing to match
+        and the message read as though the command were broken.
+        """
+        parsed = parse(text)
+        if parsed.mode == "command_arg" and parsed.command is not None:
+            if parsed.command.arg_type == "path":
+                return (
+                    "[dim]Type a path and press enter — it does not have to exist yet.\n"
+                    f"Example:  [/dim]/{parsed.command.name} ~/remotely-hosts.json"
+                    + ("  [dim]--secrets[/dim]" if parsed.command.name == "export" else "")
+                    + "\n[dim]Or run [/dim]/"
+                    + parsed.command.name
+                    + "[dim] with no path to be prompted.[/dim]"
+                )
+        return "[dim]No matches[/dim]"
 
     def _grouped_host_widgets(self) -> list:
         groups = self.store.groups()

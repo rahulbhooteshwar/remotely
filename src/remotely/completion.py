@@ -14,7 +14,9 @@ tested without standing up an app.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Iterable, Literal, Sequence
 
 from .models import Host
@@ -319,7 +321,62 @@ class CompletionEngine:
                 )
                 for name, score in rank(parsed.query, self._themes(), limit=self.limit)
             ]
+        if command.arg_type == "path":
+            return self._complete_path(parsed)
         return []
+
+    def _complete_path(self, parsed: ParsedInput) -> list[Completion]:
+        """Filesystem completion for /export and /import.
+
+        Completes only the final token, and rebuilds the suggestion from the
+        text the user actually typed rather than from a resolved path - so a
+        "~/" or a relative prefix survives instead of being silently expanded
+        to something they did not write.
+        """
+        command = parsed.command
+        assert command is not None
+        text = parsed.query
+
+        # Flags such as --secrets are arguments too; complete the last token.
+        head, separator, token = text.rpartition(" ")
+        prefix = f"/{command.name} " + (head + separator if separator else "")
+        if token.startswith("-"):
+            return []
+
+        slash = token.rfind(os.sep)
+        typed_dir = token[: slash + 1] if slash >= 0 else ""
+        stub = token[slash + 1 :]
+
+        try:
+            directory = Path(typed_dir).expanduser() if typed_dir else Path.cwd()
+            entries = sorted(
+                directory.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())
+            )
+        except OSError:
+            return []
+
+        out: list[Completion] = []
+        for entry in entries:
+            # Hidden entries only once the user shows interest in them.
+            if entry.name.startswith(".") and not stub.startswith("."):
+                continue
+            if not entry.name.lower().startswith(stub.lower()):
+                continue
+            is_dir = entry.is_dir()
+            value = typed_dir + entry.name + (os.sep if is_dir else "")
+            out.append(
+                Completion(
+                    value=value,
+                    label=entry.name + (os.sep if is_dir else ""),
+                    kind="path",
+                    description="directory" if is_dir else _size_hint(entry),
+                    insert=prefix + value,
+                    score=900 if is_dir else 800,
+                )
+            )
+            if len(out) >= self.limit:
+                break
+        return out
 
     def _complete_tag(self, parsed: ParsedInput) -> list[Completion]:
         out: list[Completion] = []
@@ -388,3 +445,15 @@ class CompletionEngine:
         if parsed.mode == "host":
             return self.matching_hosts(parsed.query)
         return []
+
+
+def _size_hint(entry: Path) -> str:
+    try:
+        size = entry.stat().st_size
+    except OSError:
+        return "file"
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit != "B" else f"{size} B"
+        size /= 1024
+    return "file"

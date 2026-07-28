@@ -248,3 +248,54 @@ def test_blob_matches_need_a_substring_not_a_subsequence() -> None:
     assert [h.name for h in engine.matching_hosts("qcal")] == ["QCAL Prod"]
     assert len(engine.matching_hosts("saas")) == 2
     assert len(engine.matching_hosts("PRODUCTION")) == 2
+
+
+# --------------------------------------------------------- path completion
+
+
+def test_path_argument_completes_the_filesystem(tmp_path) -> None:
+    """/export used to offer nothing at all, so the pane said "No matches"."""
+    (tmp_path / "backups").mkdir()
+    (tmp_path / "hosts.json").write_text("{}")
+    (tmp_path / "hosts-old.json").write_text("{}")
+    (tmp_path / ".hidden").write_text("")
+
+    engine = CompletionEngine(hosts=lambda: [])
+    results = engine.complete(f"/export {tmp_path}/")
+    labels = [c.label for c in results]
+
+    assert "backups/" in labels, labels
+    assert "hosts.json" in labels
+    # Directories first, so tabbing through walks down the tree.
+    assert labels.index("backups/") < labels.index("hosts.json")
+    # Hidden entries stay out until asked for.
+    assert ".hidden" not in labels
+    assert ".hidden" in [c.label for c in engine.complete(f"/export {tmp_path}/.")]
+
+
+def test_path_completion_narrows_by_prefix(tmp_path) -> None:
+    (tmp_path / "hosts.json").write_text("{}")
+    (tmp_path / "other.json").write_text("{}")
+    engine = CompletionEngine(hosts=lambda: [])
+    labels = [c.label for c in engine.complete(f"/export {tmp_path}/hos")]
+    assert labels == ["hosts.json"], labels
+
+
+def test_path_completion_keeps_what_the_user_typed(tmp_path, monkeypatch) -> None:
+    """A "~/" prefix must survive rather than being expanded behind their back."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "notes.json").write_text("{}")
+
+    engine = CompletionEngine(hosts=lambda: [])
+    inserts = [c.insert_text for c in engine.complete("/export ~/not")]
+    assert inserts == ["/export ~/notes.json"], inserts
+
+
+def test_path_completion_survives_an_unreadable_directory() -> None:
+    engine = CompletionEngine(hosts=lambda: [])
+    assert engine.complete("/export /no/such/directory/x") == []
+
+
+def test_flags_are_not_completed_as_paths(tmp_path) -> None:
+    engine = CompletionEngine(hosts=lambda: [])
+    assert engine.complete(f"/export {tmp_path}/x.json --sec") == []

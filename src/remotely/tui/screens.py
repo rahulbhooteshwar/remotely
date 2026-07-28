@@ -645,6 +645,8 @@ class HelpScreen(CompactOnSmall, ModalScreen[None]):
   /lock            lock the vault
   /export <path>   export hosts    (add --secrets to include credentials)
   /import <path>   import hosts    (add --replace to overwrite everything)
+                   paths complete as you type and need not exist yet;
+                   run either with no path to be prompted
   /help            this help
   /quit            exit
 

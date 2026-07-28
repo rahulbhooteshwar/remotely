@@ -285,6 +285,17 @@ reloads after editing.
 ## Import / export
 
 ```
+/export ~/hosts.json            hosts only, no secrets
+/export ~/hosts.json --secrets  include credentials (vault must be unlocked)
+/import ~/hosts.json            merge in, skipping names you already have
+/import ~/hosts.json --replace  replace everything
+```
+
+The path completes as you type, and does not have to exist yet. Run `/export`
+with no path to be prompted with a sensible default instead.
+
+
+```
 /export ~/hosts.json          hosts only, no secrets
 /export ~/all.json --secrets  hosts plus credentials, vault must be unlocked
 /import ~/hosts.json          merge, skipping existing names
