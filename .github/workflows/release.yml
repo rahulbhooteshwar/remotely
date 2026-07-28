@@ -297,8 +297,17 @@ jobs:
             the whole runtime, or run
             `xattr -dr com.apple.quarantine /path/to/remotely`.
 
-  # Opt-in. Configure PyPI trusted publishing for this repository and remove
-  # the `if: false` to enable.
+  # Opt-in, and NOT yet enabled - three things are needed first:
+  #
+  #   1. A distribution name that is free on PyPI. "remotely" is taken by an
+  #      unrelated project, so [project].name in pyproject.toml has to change
+  #      before anything can be uploaded.
+  #   2. A Trusted Publisher on PyPI for this repository, workflow
+  #      release.yml, environment "pypi". No token is needed with OIDC, which
+  #      is why this job has id-token: write and no password.
+  #   3. A GitHub environment called "pypi" (Settings -> Environments).
+  #
+  # Then delete the `if: false` below.
   pypi:
     name: publish to PyPI
     if: false
@@ -310,5 +319,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+
+      # The version is dynamic, read from src/remotely/__init__.py, and this
+      # job checks out the repo fresh - so without re-injecting it here the
+      # upload would carry the placeholder version rather than the release's.
+      # PyPI refuses to replace a version once uploaded, so that mistake would
+      # be permanent.
+      - name: Inject version
+        run: |
+          python - "${{ needs.prepare.outputs.version }}" <<'PY'
+          import pathlib, re, sys
+          version = sys.argv[1]
+          path = pathlib.Path("src/remotely/__init__.py")
+          text = path.read_text(encoding="utf-8")
+          new, _ = re.subn(
+              r'^__version__ = ".*"$', f'__version__ = "{version}"', text, count=1, flags=re.M
+          )
+          path.write_text(new, encoding="utf-8")
+          PY
+
       - run: uv build
+
+      - name: Confirm the built files carry the release version
+        run: |
+          ls -1 dist/
+          test -f "dist/remotely-${{ needs.prepare.outputs.version }}.tar.gz" \
+            || { echo "::error::built sdist is not version ${{ needs.prepare.outputs.version }}"; exit 1; }
+
       - uses: pypa/gh-action-pypi-publish@release/v1

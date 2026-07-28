@@ -374,6 +374,23 @@ rather than to `~/.local/bin`.
 It uses only the standard library — a HTTP client for one occasional download
 would be weight in every binary.
 
+## PyPI (not enabled)
+
+The `pypi` job in `release.yml` is written for trusted publishing (OIDC, no
+token) but gated behind `if: false`. Three things block it:
+
+1. **The name `remotely` is taken on PyPI** by an unrelated project, so
+   `[project].name` has to change before anything can be uploaded. The import
+   name can stay `remotely` either way.
+2. A Trusted Publisher has to be configured on PyPI for this repo, workflow
+   `release.yml`, environment `pypi`.
+3. A GitHub environment named `pypi` has to exist.
+
+The job re-injects the version before building. It checks the repo out fresh,
+and the version is dynamic from `src/remotely/__init__.py`, so without that
+step it would upload the placeholder version — and PyPI never lets a version
+be replaced.
+
 ## Versioning and release
 
 `__version__` in `src/remotely/__init__.py` is the single source of truth;
