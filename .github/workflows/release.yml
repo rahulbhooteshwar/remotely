@@ -95,16 +95,30 @@ jobs:
         shell: bash
         run: |
           SANDBOX="$RUNNER_TEMP/sandbox"
+          rm -rf "$SANDBOX"
           mkdir -p "$SANDBOX/bin" "$SANDBOX/home"
-          for tool in sh env printf ls cat; do
-            src=$(command -v "$tool") && ln -sf "$src" "$SANDBOX/bin/$tool"
+          # type -P skips shell builtins and yields a real path; `command -v`
+          # returns the bare name for a builtin, which makes a dangling symlink.
+          for tool in sh env ls cat; do
+            src=$(type -P "$tool" || true)
+            [ -n "$src" ] && ln -sf "$src" "$SANDBOX/bin/$tool"
           done
           cp dist/remotely "$SANDBOX/bin/remotely"
 
-          env -i PATH="$SANDBOX/bin" sh -c '
-            for t in python python3 uv tmux ssh sshpass; do
-              command -v $t >/dev/null 2>&1 && { echo "::error::$t leaked into the sandbox"; exit 1; }
-            done'
+          # Absence is the success case here, so it must be stated positively:
+          # a bare `command -v` loop ends on the non-zero status of the last
+          # lookup and fails the step exactly when the sandbox is correct.
+          leaked=""
+          for t in python python3 uv tmux ssh sshpass; do
+            if env -i PATH="$SANDBOX/bin" sh -c "command -v $t" >/dev/null 2>&1; then
+              leaked="$leaked $t"
+            fi
+          done
+          if [ -n "$leaked" ]; then
+            echo "::error::these leaked into the sandbox:$leaked"
+            exit 1
+          fi
+          echo "sandbox is bare: no python, uv, tmux, ssh or sshpass"
 
           OUT=$(env -i PATH="$SANDBOX/bin" HOME="$SANDBOX/home" TERM=xterm-256color \
                 REMOTELY_HOME="$SANDBOX/home/.remotely" "$SANDBOX/bin/remotely" --version)
