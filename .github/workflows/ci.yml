@@ -85,11 +85,11 @@ jobs:
       - name: Verify the binary architecture
         shell: bash
         run: |
-          file dist/remotely
+          file dist/remotely/remotely
           if [ "$(uname -s)" = "Darwin" ]; then
-            got=$(lipo -archs dist/remotely)
+            got=$(lipo -archs dist/remotely/remotely)
           else
-            case "$(file -b dist/remotely)" in
+            case "$(file -b dist/remotely/remotely)" in
               *x86-64*)  got="x86-64" ;;
               *aarch64*) got="aarch64" ;;
               *)         got="unknown" ;;
@@ -100,6 +100,16 @@ jobs:
             *"${{ matrix.expect_arch }}"*) echo "architecture matches" ;;
             *) echo "::error::${{ matrix.target }} produced '$got', expected ${{ matrix.expect_arch }}"; exit 1 ;;
           esac
+
+      # Ad-hoc sign on macOS. Unsigned bundled libraries make Gatekeeper do
+      # more work on first load, and an invalid signature on an arm64 binary
+      # is fatal rather than merely slow.
+      - name: Ad-hoc code sign (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          codesign --force --deep --sign - dist/remotely/remotely
+          codesign --verify --deep --verbose=2 dist/remotely/remotely
 
       # The binary is only worth shipping if it runs with nothing installed,
       # so verify that rather than just that the file exists.
@@ -115,7 +125,9 @@ jobs:
             src=$(type -P "$tool" || true)
             [ -n "$src" ] && ln -sf "$src" "$SANDBOX/bin/$tool"
           done
-          cp dist/remotely "$SANDBOX/bin/remotely"
+          # The runtime is a directory now, so the sandbox needs the whole tree.
+          cp -R dist/remotely "$SANDBOX/runtime"
+          ln -sf "$SANDBOX/runtime/remotely" "$SANDBOX/bin/remotely"
 
           # Absence is the success case here, so it must be stated positively:
           # a bare `command -v` loop ends on the non-zero status of the last

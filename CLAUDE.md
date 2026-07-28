@@ -4,8 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Remotely is a terminal SSH connection manager that ships as **one binary with
-zero runtime dependencies** — no Python, no uv, no tmux, no OpenSSH, no sshpass.
+Remotely is a terminal SSH connection manager that ships as a **self-contained
+runtime with zero dependencies** — no Python, no uv, no tmux, no OpenSSH, no
+sshpass.
 It carries its own SSH client (paramiko) and its own terminal emulator (pyte),
 and PyInstaller bundles the interpreter.
 
@@ -245,8 +246,17 @@ Run with `-W error::DeprecationWarning`.
 
 ## Packaging
 
-`remotely.spec` bundles the interpreter and dependencies. Two things there are
-load-bearing:
+`remotely.spec` bundles the interpreter and dependencies. Three things there
+are load-bearing:
+
+- **It is a onedir build (`COLLECT`), and must stay one.** onefile unpacks ~26MB
+  and ~38 shared libraries into a fresh temp directory on *every* launch and
+  deletes it on exit. On macOS each library lands at a new path each time, so
+  Gatekeeper re-verifies all of them every run and never reuses a verdict —
+  that is a ~10s startup. onedir measures ~110ms against ~500-800ms on Linux
+  and removes the repeated Gatekeeper work entirely. `runtime_tmpdir` does
+  **not** help: it only moves where the throwaway directory is created, the
+  bootloader still extracts and still deletes (verified).
 
 - **`hiddenimports`** — paramiko selects key and cipher backends dynamically, so
   the import graph does not reach them; `collect_submodules("paramiko")` plus the
@@ -259,14 +269,23 @@ load-bearing:
 ## Self-update
 
 `updater.py` implements `remotely --update`: resolve the latest release,
-download this platform's artefact, verify its SHA-256, and `os.replace` over
-`sys.executable`. Replacing a running binary is safe on Unix because rename
-unlinks the old inode, which stays alive until the process exits; staging in
-the destination directory keeps the rename on one filesystem so it is atomic.
+download this platform's artefact, verify its SHA-256, and swap the **runtime
+directory** wholesale. Swapping directories is safe on Unix for the same reason
+replacing a file is — the running process keeps the old inodes and carries on —
+and staging beside the target keeps the rename on one filesystem.
 
-Two invariants have tests and should keep them: a checksum mismatch must leave
-the installed binary untouched, and version comparison must be numeric (a
-string compare puts 1.9.0 above 1.10.0).
+`runtime_dir()` decides what to replace: the executable's parent, but only when
+`_internal` sits beside it, and only after resolving `sys.executable`. The
+resolve matters because the command on PATH is a symlink into the runtime;
+without it an update would write into `~/.local/bin`. It returns `None` for a
+source checkout and for the pre-1.2 single-file layout, which cannot be swapped
+for a directory in place — those are told to re-run `install.sh` once, and the
+check happens *before* the download so nothing is fetched needlessly.
+
+Three invariants have tests and should keep them: a checksum mismatch must
+leave the install untouched, version comparison must be numeric (a string
+compare puts 1.9.0 above 1.10.0), and the symlink must resolve to the runtime
+rather than to `~/.local/bin`.
 
 It uses only the standard library — a HTTP client for one occasional download
 would be weight in every binary.

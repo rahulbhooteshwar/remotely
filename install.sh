@@ -9,12 +9,14 @@
 # Environment overrides:
 #   REMOTELY_REPO      owner/name to download from  (default rahulbhooteshwar/remotely)
 #   REMOTELY_VERSION   tag to install, e.g. v1.0.0  (default: latest release)
-#   REMOTELY_BIN_DIR   install location             (default ~/.local/bin)
+#   REMOTELY_BIN_DIR   where the command goes       (default ~/.local/bin)
+#   REMOTELY_LIB_DIR   where the runtime goes       (default ~/.local/lib/remotely)
 
 set -eu
 
 REPO="${REMOTELY_REPO:-rahulbhooteshwar/remotely}"
 BIN_DIR="${REMOTELY_BIN_DIR:-$HOME/.local/bin}"
+LIB_DIR="${REMOTELY_LIB_DIR:-$HOME/.local/lib/remotely}"
 VERSION="${REMOTELY_VERSION:-}"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -136,20 +138,41 @@ else
 fi
 
 tar -xzf "$TMP/$ARCHIVE" -C "$TMP" || fail "Could not extract $ARCHIVE"
-[ -f "$TMP/remotely" ] || fail "Archive did not contain a 'remotely' binary"
+[ -x "$TMP/remotely/remotely" ] || fail "Archive did not contain a 'remotely' runtime"
 
 # ----------------------------------------------------------------- install
 
-mkdir -p "$BIN_DIR"
-# Replace atomically so a running copy is never truncated underneath itself.
-mv "$TMP/remotely" "$BIN_DIR/remotely.new"
-chmod 755 "$BIN_DIR/remotely.new"
-mv "$BIN_DIR/remotely.new" "$BIN_DIR/remotely"
-ok "Installed to $BIN_DIR/remotely"
+# The runtime is a directory, not a single file. Unpacking it once here is the
+# whole point: the alternative (a onefile binary) re-extracts ~26MB of shared
+# libraries on every launch, which on macOS makes Gatekeeper re-verify all of
+# them every time and costs about ten seconds of startup.
+mkdir -p "$BIN_DIR" "$(dirname "$LIB_DIR")"
+
+# Swap the tree in rather than writing over it in place: a running copy keeps
+# the old inodes and carries on working, and a failed download never leaves a
+# half-replaced install behind.
+rm -rf "$LIB_DIR.old"
+if [ -e "$LIB_DIR" ]; then
+    mv "$LIB_DIR" "$LIB_DIR.old" || fail "Could not move the previous install aside"
+fi
+if mv "$TMP/remotely" "$LIB_DIR"; then
+    rm -rf "$LIB_DIR.old"
+else
+    # Put it back rather than leaving the user with nothing.
+    [ -e "$LIB_DIR.old" ] && mv "$LIB_DIR.old" "$LIB_DIR"
+    fail "Could not install into $LIB_DIR"
+fi
+chmod 755 "$LIB_DIR/remotely"
+
+# A symlink, so `remotely` on PATH always points at the current runtime and an
+# update never has to touch BIN_DIR.
+ln -sf "$LIB_DIR/remotely" "$BIN_DIR/remotely"
+ok "Installed to $LIB_DIR (linked from $BIN_DIR/remotely)"
 
 # macOS quarantines anything downloaded; clear it so the binary just runs.
+# The whole tree, not just the entry point - every bundled library is checked.
 if [ "$OS" = "Darwin" ] && have xattr; then
-    xattr -d com.apple.quarantine "$BIN_DIR/remotely" 2>/dev/null || true
+    xattr -dr com.apple.quarantine "$LIB_DIR" 2>/dev/null || true
 fi
 
 # -------------------------------------------------------------------- PATH
@@ -187,4 +210,4 @@ else
 fi
 
 printf '\nConfig lives in ~/.remotely\n'
-printf 'Uninstall with: rm %s/remotely\n\n' "$BIN_DIR"
+printf 'Uninstall with: rm %s/remotely && rm -rf %s\n\n' "$BIN_DIR" "$LIB_DIR"

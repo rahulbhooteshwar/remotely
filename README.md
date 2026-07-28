@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/rahulbhooteshwar/remotely?sort=semver)](https://github.com/rahulbhooteshwar/remotely/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Terminal based SSH hosts and connection manager. One binary, zero dependencies.**
+**Terminal based SSH hosts and connection manager. Self-contained, zero dependencies.**
 
 `remotely` opens a full-screen terminal UI that lists your saved SSH hosts by
 group, connects to them in tabs, and colours each session by theme so you always
@@ -31,7 +31,7 @@ Remotely takes none of those trades:
 
 | | How |
 |---|---|
-| **Nothing to install** | Ships its own SSH client, terminal emulator and interpreter in one binary |
+| **Nothing to install** | Ships its own SSH client, terminal emulator and interpreter |
 | **Passwords stay in memory** | Fed straight into the SSH handshake - never on disk, in an env var, or on a command line |
 | **Prod looks like prod** | Per-host themes colour the whole session, so a red pane is never staging |
 | **One input for everything** | Search, commands, tags and groups all come from the same bar |
@@ -48,11 +48,25 @@ None. Run `remotely --doctor` to confirm.
 curl -LsSf https://raw.githubusercontent.com/rahulbhooteshwar/remotely/main/install.sh | sh
 ```
 
-Downloads a prebuilt binary for your platform, verifies its checksum, drops it
-in `~/.local/bin`, and clears macOS quarantine. Nothing else is installed.
+Downloads a prebuilt runtime for your platform, verifies its checksum, unpacks
+it into `~/.local/lib/remotely`, links `remotely` into `~/.local/bin`, and
+clears macOS quarantine. Nothing else is installed.
 
-Or grab a binary from the [releases page](https://github.com/rahulbhooteshwar/remotely/releases),
-`chmod +x` it, and put it on your `PATH`.
+Or grab the tarball for your platform from the
+[releases page](https://github.com/rahulbhooteshwar/remotely/releases), unpack
+it somewhere, and put a link to `remotely/remotely` on your `PATH`.
+
+<details>
+<summary>Why a directory rather than one file</summary>
+
+A single-file build has to unpack ~26 MB of shared libraries into a temporary
+directory on **every** launch. On macOS each library lands at a fresh path each
+time, so Gatekeeper re-verifies all of them on every run and never reuses a
+verdict - that alone took startup to about ten seconds. Unpacking once at
+install time instead brings it to roughly 100 ms. The libraries still ship with
+the tool; nothing extra is required on your machine.
+
+</details>
 
 <details>
 <summary>Installing from source instead</summary>
@@ -69,8 +83,8 @@ uv tool install git+https://github.com/rahulbhooteshwar/remotely
 remotely --update
 ```
 
-Checks the latest release, downloads the binary for your platform, verifies its
-SHA-256 and replaces itself in place. Restart Remotely afterwards. It says so
+Checks the latest release, downloads the runtime for your platform, verifies
+its SHA-256 and swaps it in place. Restart Remotely afterwards. It says so
 and changes nothing when you are already current, and refuses to install
 anything whose checksum does not match.
 
@@ -85,7 +99,8 @@ Installed from source instead? `uv tool install --force git+https://github.com/r
 ### Uninstall
 
 ```bash
-rm ~/.local/bin/remotely          # the binary
+rm ~/.local/bin/remotely          # the command
+rm -rf ~/.local/lib/remotely      # the runtime
 rm -rf ~/.remotely                # configuration and vault, if you want them gone
 ```
 

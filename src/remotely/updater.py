@@ -48,6 +48,26 @@ def running_as_binary() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def runtime_dir() -> Path | None:
+    """The installed runtime directory, or None if this is not one.
+
+    A onedir install is the executable sitting beside PyInstaller's
+    ``_internal`` directory; that pair is what gets replaced wholesale on
+    update. ``sys.executable`` is resolved first because the command on PATH is
+    a symlink into this directory, and updating the symlink's parent would
+    write into ~/.local/bin instead of the runtime.
+
+    Returns None for a source checkout or for the older single-file binary,
+    neither of which can be swapped this way.
+    """
+    if not running_as_binary():
+        return None
+    executable = Path(sys.executable).resolve()
+    if (executable.parent / "_internal").is_dir():
+        return executable.parent
+    return None
+
+
 def target_name() -> str:
     """The release artefact for this platform, matching install.sh."""
     machine = platform.machine().lower()
@@ -156,10 +176,18 @@ def apply_update(release: Release, *, log=print) -> Path:
             f"  Currently attached: {available}"
         )
 
-    destination = Path(sys.executable).resolve()
-    if not os.access(destination.parent, os.W_OK):
+    runtime = runtime_dir()
+    if runtime is None:
         raise UpdateError(
-            f"No write permission for {destination.parent}. "
+            "This looks like an older single-file install, which cannot be\n"
+            "  updated in place to the current layout.\n"
+            "  Re-run install.sh once and --update will work from then on:\n"
+            "    curl -LsSf https://raw.githubusercontent.com/"
+            f"{REPO}/main/install.sh | sh"
+        )
+    if not os.access(runtime.parent, os.W_OK):
+        raise UpdateError(
+            f"No write permission for {runtime.parent}. "
             "Re-run with the right permissions, or reinstall with install.sh."
         )
 
@@ -178,36 +206,45 @@ def apply_update(release: Release, *, log=print) -> Path:
         else:
             log("WARNING: release published no checksum; skipping verification.")
 
+        unpacked = work / "unpacked"
         try:
             with tarfile.open(archive) as tar:
-                # Never let an archive write outside the work directory.
-                for member in tar.getmembers():
-                    if member.name != "remotely" or not member.isfile():
-                        continue
-                    # Explicit filter, not just to silence the Python 3.12+
-                    # DeprecationWarning: "data" also strips setuid/setgid bits
-                    # and rejects device files, which a single named regular
-                    # member does not otherwise guard against.
-                    tar.extract(member, work, filter="data")
-                    break
-                else:
-                    raise UpdateError("Archive did not contain a 'remotely' binary.")
+                # "data" strips setuid/setgid bits, rejects device files and
+                # refuses members that would escape the destination, so an
+                # archive cannot write outside the work directory.
+                tar.extractall(unpacked, filter="data")
         except tarfile.TarError as exc:
             raise UpdateError(f"Could not unpack the archive: {exc}") from exc
 
-        fresh = work / "remotely"
-        fresh.chmod(fresh.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        fresh = unpacked / "remotely"
+        entry = fresh / "remotely"
+        if not entry.is_file():
+            raise UpdateError("Archive did not contain a 'remotely' runtime.")
+        entry.chmod(entry.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-        # Replacing a running executable is fine on Unix: rename unlinks the old
-        # inode, which stays alive for this process until it exits. Staging in
-        # the destination directory keeps the rename on one filesystem so it is
-        # atomic - a half-copied binary would leave nothing runnable.
-        staged = destination.with_name(destination.name + ".new")
-        shutil.copy2(fresh, staged)
-        staged.chmod(0o755)
-        os.replace(staged, destination)
+        # Swap whole directories rather than writing over the live one. The
+        # running process keeps the old inodes and carries on working; nothing
+        # ever sees a half-replaced tree. Stage beside the target so the rename
+        # stays on one filesystem.
+        staged = runtime.with_name(runtime.name + ".new")
+        previous = runtime.with_name(runtime.name + ".old")
+        for leftover in (staged, previous):
+            shutil.rmtree(leftover, ignore_errors=True)
 
-    return destination
+        shutil.copytree(fresh, staged, symlinks=True)
+        try:
+            if runtime.exists():
+                os.replace(runtime, previous)
+            os.replace(staged, runtime)
+        except OSError as exc:
+            # Put the old tree back rather than leaving nothing runnable.
+            if not runtime.exists() and previous.exists():
+                os.replace(previous, runtime)
+            shutil.rmtree(staged, ignore_errors=True)
+            raise UpdateError(f"Could not install the new runtime: {exc}") from exc
+        shutil.rmtree(previous, ignore_errors=True)
+
+    return runtime / "remotely"
 
 
 def update(*, log=print) -> int:

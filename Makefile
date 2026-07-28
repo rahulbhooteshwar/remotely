@@ -30,8 +30,8 @@ test:
 
 binary:
 	uv run pyinstaller --noconfirm --clean remotely.spec
-	@echo "Built: ./dist/remotely"
-	@ls -lh dist/remotely
+	@echo "Built: ./dist/remotely/remotely  (onedir - the tree is the artefact)"
+	@du -sh dist/remotely
 
 lint:
 	uv run python -m compileall -q src/remotely

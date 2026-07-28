@@ -74,23 +74,48 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+# A onedir build, deliberately, and it is the single biggest thing keeping
+# startup fast.
+#
+# In onefile mode the bootloader unpacks the whole archive - 26MB and ~38
+# shared libraries - into a fresh temp directory on *every* launch and deletes
+# it on exit. On Linux that costs about half a second. On macOS it is far
+# worse: each library lands at a new path every time, so Gatekeeper re-verifies
+# all of them on every run and never gets to reuse a verdict, which took
+# startup to roughly ten seconds.
+#
+# runtime_tmpdir does NOT fix this - it only moves where the throwaway
+# directory is created; the bootloader still extracts and still deletes.
+# Measured, onedir starts in ~110ms against ~500-800ms for onefile on Linux,
+# and removes the repeated Gatekeeper work on macOS entirely.
+#
+# The cost is that the artefact is a directory rather than one file. install.sh
+# unpacks it once into ~/.local/lib/remotely and links the entry point into
+# ~/.local/bin, so that stays invisible to users.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="remotely",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     # UPX mangles signatures on macOS and buys little here.
     upx=False,
-    runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="remotely",
 )
