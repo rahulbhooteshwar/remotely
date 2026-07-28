@@ -189,6 +189,30 @@ session tab is active, via `_sync_banner_visibility()` — called from both
 the visible tab changes. A successful connect deliberately writes **no** status
 line; only `session.notes` (warnings) surface there.
 
+### The tab row
+
+`SessionTabs` exists because Textual's `Tabs` scrolls only in
+`_scroll_active_tab()` — on activation or resize. With more tabs than fit, the
+ones off the end were reachable only by activating one, which needs a click on
+a tab you cannot see. It adds wheel scrolling anywhere over the row, and
+auto-scroll while the pointer sits near either edge.
+
+Two things there are easy to get wrong:
+
+- **`scroll_to` needs `force=True`.** `#tabs-scroll` is `overflow: hidden`, so
+  Textual refuses to scroll it otherwise. `Tabs` passes the same flag.
+- **Work from `scroll_target_x`, not `scroll_offset`.** The offset settles a
+  frame later, so back-to-back timer ticks read a stale value, conclude the end
+  has been reached, and stop after a single step.
+
+`SessionTab` hit-testing measures against **`region`**, not `size`: `event.x` is
+relative to the region, which includes border and padding, while `size` is the
+content box alone. Using `size` put the close hot-zone several cells too far
+left, so clicking the end of the host name closed the tab — and adding the
+border made it worse. The left/right borders are what stop two tabs on the same
+theme merging into one block of colour; a `Tab` is one row tall, so only the
+vertical edges are available.
+
 ### Theme icons vs. tab colour
 
 The theme's emoji marks hosts in the **launcher list only**. Tabs convey the

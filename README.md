@@ -174,6 +174,7 @@ The input at the top is the only control surface. It completes as you type.
 | mouse wheel | scroll the session |
 | drag | select session text - copied to the clipboard when you release |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | previous / next tab |
+| wheel over the tab row | scroll the tabs (or hold the pointer at either edge) |
 | `Ctrl+N` | new host |
 | `Ctrl+E` / `Ctrl+D` | edit / delete a host - the one on the current session tab, or the highlighted one on the launcher |
 | `Ctrl+T` | themes |

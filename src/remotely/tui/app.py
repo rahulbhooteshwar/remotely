@@ -75,25 +75,153 @@ class SessionTab(Tab):
     def on_mount(self) -> None:
         # Accent on the theme's own terminal background: bright enough to tell
         # prod from the rest instantly, dark text so the label stays readable.
+        dark = self.theme_colors.pane_styles()["background"]
         self.styles.background = self.theme_colors.accent
-        self.styles.color = self.theme_colors.pane_styles()["background"]
+        self.styles.color = dark
         self.styles.text_style = "bold"
+        # Edges, so two tabs on the same theme do not merge into one block of
+        # colour. A Tab is one row tall, so only the vertical edges are
+        # available - which is all that is needed to tell them apart.
+        self.styles.border_left = ("outer", dark)
+        self.styles.border_right = ("outer", dark)
 
     def set_title(self, title: str) -> None:
         self._title = title
         self.label = f"{title}  {self.CLOSE_GLYPH}"
 
     def _on_click(self, event) -> None:
-        # The glyph plus its padding occupies the last few cells.
+        # The glyph plus its trailing padding occupies the last few cells.
+        #
+        # Measure against `region`, not `size`: event.x is relative to the
+        # widget's region, which includes the border and padding, while `size`
+        # is the content box alone. Using `size` here put the hot zone several
+        # cells too far left, so clicking the end of the host name closed the
+        # tab - and the border added later made that worse.
         #
         # Never call super() here: Tab._on_click takes no event argument, so
         # passing one is a TypeError. Textual already walks the MRO and invokes
         # the base handler itself; prevent_default() breaks that walk, which is
         # precisely how a hit on the x suppresses "select this tab".
-        if self.id and event.x >= max(0, self.size.width - 3):
+        if self.id and event.x >= max(0, self.region.width - 3):
             event.prevent_default()
             event.stop()
             self.post_message(self.CloseRequested(self.id))
+
+
+class SessionTabs(Tabs):
+    """The tab row, with scrolling that does not depend on clicking a tab.
+
+    Textual's Tabs only scrolls when the active tab changes or the widget is
+    resized, so with more tabs than fit, the ones off the end are reachable
+    only by activating something - which is the thing you cannot see well
+    enough to click. This adds the two ways people actually try: the wheel
+    anywhere over the row, and holding the pointer near either edge.
+    """
+
+    #: Cells from an edge that count as "on the edge" for hover scrolling.
+    EDGE = 2
+    #: Cells moved per wheel notch.
+    WHEEL_STEP = 6
+    #: Cells per tick while hovering an edge, and how often that ticks.
+    HOVER_STEP = 2
+    HOVER_INTERVAL = 0.06
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._edge_timer = None
+        self._edge_direction = 0
+
+    def _viewport(self):
+        try:
+            return self.query_one("#tabs-scroll")
+        except NoMatches:
+            return None
+
+    def _shift(self, cells: int) -> bool:
+        """Scroll the row by ``cells``; True if there was anywhere to go.
+
+        Works from ``scroll_target_x`` rather than the current offset: the
+        offset settles a frame later, so back-to-back ticks would read a stale
+        value, conclude the end had been reached and stop the scroll after a
+        single step.
+        """
+        viewport = self._viewport()
+        if viewport is None:
+            return False
+        limit = viewport.max_scroll_x
+        current = viewport.scroll_target_x
+        target = max(0, min(limit, current + cells))
+        if target == current:
+            return False
+        # force=True is required: #tabs-scroll is `overflow: hidden`, so Textual
+        # refuses to scroll it otherwise. Tabs' own _scroll_active_tab passes
+        # the same flag for the same reason.
+        viewport.scroll_to(x=target, animate=False, force=True)
+        return True
+
+    # ------------------------------------------------------------------ wheel
+
+    # A terminal reports a plain wheel as vertical even when the content is a
+    # row, so vertical notches have to drive horizontal movement here or the
+    # wheel would do nothing at all over the tab bar.
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        if self._shift(self.WHEEL_STEP):
+            event.stop()
+            event.prevent_default()
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        if self._shift(-self.WHEEL_STEP):
+            event.stop()
+            event.prevent_default()
+
+    def _on_mouse_scroll_right(self, event: events.MouseScrollRight) -> None:
+        if self._shift(self.WHEEL_STEP):
+            event.stop()
+            event.prevent_default()
+
+    def _on_mouse_scroll_left(self, event: events.MouseScrollLeft) -> None:
+        if self._shift(-self.WHEEL_STEP):
+            event.stop()
+            event.prevent_default()
+
+    # ------------------------------------------------------------ edge hover
+
+    def _on_mouse_move(self, event: events.MouseMove) -> None:
+        width = self.size.width
+        if width <= 0:
+            return
+        if event.x <= self.EDGE:
+            self._start_edge_scroll(-self.HOVER_STEP)
+        elif event.x >= width - 1 - self.EDGE:
+            self._start_edge_scroll(self.HOVER_STEP)
+        else:
+            self._stop_edge_scroll()
+
+    def _on_leave(self, event: events.Leave) -> None:
+        self._stop_edge_scroll()
+
+    def _start_edge_scroll(self, direction: int) -> None:
+        if self._edge_direction == direction and self._edge_timer is not None:
+            return
+        self._stop_edge_scroll()
+        self._edge_direction = direction
+        self._edge_timer = self.set_interval(
+            self.HOVER_INTERVAL, lambda: self._edge_tick(direction)
+        )
+
+    def _edge_tick(self, direction: int) -> None:
+        # Stop once the end is reached rather than ticking forever.
+        if not self._shift(direction):
+            self._stop_edge_scroll()
+
+    def _stop_edge_scroll(self) -> None:
+        if self._edge_timer is not None:
+            self._edge_timer.stop()
+            self._edge_timer = None
+        self._edge_direction = 0
+
+    def on_unmount(self) -> None:
+        self._stop_edge_scroll()
 
 
 class CommandBar(Input):
@@ -186,7 +314,7 @@ class RemotelyApp(App[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             yield Static("", id="banner")
-            yield Tabs(Tab("Launcher", id=LAUNCHER_TAB), id="tabs")
+            yield SessionTabs(Tab("Launcher", id=LAUNCHER_TAB), id="tabs")
             with ContentSwitcher(initial=LAUNCHER_TAB, id="content"):
                 with Vertical(id=LAUNCHER_TAB):
                     yield CommandBar(
@@ -606,8 +734,8 @@ class RemotelyApp(App[None]):
 
     # ------------------------------------------------------------------ tabs
 
-    def _tabs(self) -> Tabs:
-        return self.query_one("#tabs", Tabs)
+    def _tabs(self) -> SessionTabs:
+        return self.query_one("#tabs", SessionTabs)
 
     def _switch_to(self, tab_id: str) -> None:
         self.query_one("#content", ContentSwitcher).current = tab_id

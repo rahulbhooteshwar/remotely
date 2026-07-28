@@ -657,13 +657,23 @@ async def test_clicking_a_tab_does_not_crash() -> None:
                          shift=False, meta=False, ctrl=False,
                          screen_x=x, screen_y=0, style=None)
 
-        # A click on the label selects; neither path may raise.
+        # A click on the label selects; neither path may raise. Coordinates are
+        # relative to the tab's region, which includes its border and padding.
         await tab._on_message(click(1))
         await pilot.pause()
         assert app.sessions.get(session.id) is not None, "label click closed the session"
 
+        # The end of the host name must not close it either - that is the far
+        # right of the *text*, several cells before the glyph.
+        await tab._on_message(click(max(1, tab.region.width - 5)))
+        for _ in range(10):
+            await pilot.pause()
+        assert app.sessions.get(session.id) is not None, (
+            "clicking the host name closed the tab"
+        )
+
         # A click on the trailing x asks to close it.
-        await tab._on_message(click(tab.size.width - 1))
+        await tab._on_message(click(tab.region.width - 1))
         for _ in range(30):
             await pilot.pause()
         assert app.sessions.get(session.id) is None, "clicking the x did not close the tab"
@@ -1221,6 +1231,157 @@ async def test_chrome_stays_roomy_on_a_normal_terminal() -> None:
         for _ in range(12):
             await pilot.pause()
         assert app2.screen.query_one(".modal").has_class("compact")
+
+
+async def _open_many(app, pilot, count: int, theme: str = "prod") -> None:
+    from remotely.models import Host
+
+    for i in range(count):
+        app.store.add(
+            Host(name=f"box-{i:02d}", hostname=f"10.0.0.{i}", username="u", port=22,
+                 group="G", tags=[], theme=theme)
+        )
+    for i in range(count):
+        app._connect(f"box-{i:02d}")
+        for _ in range(150):
+            await pilot.pause()
+            if app.sessions.for_host(f"box-{i:02d}"):
+                break
+    for _ in range(10):
+        await pilot.pause()
+
+
+async def test_tab_bar_scrolls_with_the_wheel() -> None:
+    """Overflowing tabs were reachable only by activating one, which needs a
+    click on the tab you cannot see. The wheel now works anywhere over the row.
+    """
+    from remotely.tui.app import SessionTabs
+    from textual import events
+
+    app = RemotelyApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _open_many(app, pilot, 12)
+
+        tabs = app.query_one("#tabs", SessionTabs)
+        viewport = tabs.query_one("#tabs-scroll")
+        assert viewport.max_scroll_x > 0, "tabs do not overflow; test proves nothing"
+
+        viewport.scroll_to(x=0, animate=False, force=True)
+        await pilot.pause()
+
+        def wheel(cls):
+            return cls(widget=tabs, x=40, y=0, delta_x=0, delta_y=1, button=0,
+                       shift=False, meta=False, ctrl=False, screen_x=40, screen_y=0)
+
+        tabs._on_mouse_scroll_down(wheel(events.MouseScrollDown))
+        await pilot.pause()
+        moved = viewport.scroll_offset.x
+        assert moved > 0, "wheel down did not scroll the tab bar"
+
+        tabs._on_mouse_scroll_up(wheel(events.MouseScrollUp))
+        await pilot.pause()
+        assert viewport.scroll_offset.x < moved, "wheel up did not scroll back"
+        app.sessions.close_all()
+
+
+async def test_tab_bar_scrolls_while_hovering_an_edge() -> None:
+    from remotely.tui.app import SessionTabs
+    from textual import events
+
+    app = RemotelyApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _open_many(app, pilot, 12)
+
+        tabs = app.query_one("#tabs", SessionTabs)
+        viewport = tabs.query_one("#tabs-scroll")
+        assert viewport.max_scroll_x > 0
+        viewport.scroll_to(x=0, animate=False, force=True)
+        await pilot.pause()
+
+        def move(x):
+            return events.MouseMove(widget=tabs, x=x, y=0, delta_x=0, delta_y=0,
+                                    button=0, shift=False, meta=False, ctrl=False,
+                                    screen_x=x, screen_y=0)
+
+        tabs._on_mouse_move(move(tabs.size.width - 1))
+        for _ in range(10):
+            await pilot.pause(0.07)
+        right = viewport.scroll_offset.x
+        assert right > 0, "hovering the right edge did not scroll"
+
+        # Away from the edge it must stop, not keep drifting.
+        tabs._on_mouse_move(move(tabs.size.width // 2))
+        await pilot.pause()
+        assert tabs._edge_timer is None, "edge scrolling kept running mid-row"
+        settled = viewport.scroll_offset.x
+        for _ in range(5):
+            await pilot.pause(0.07)
+        assert viewport.scroll_offset.x == settled, "kept scrolling after leaving the edge"
+
+        # And the left edge brings it back.
+        tabs._on_mouse_move(move(0))
+        for _ in range(20):
+            await pilot.pause(0.07)
+        assert viewport.scroll_offset.x < settled, "hovering the left edge did not scroll back"
+
+        tabs._on_mouse_move(move(tabs.size.width // 2))
+        await pilot.pause()
+        app.sessions.close_all()
+
+
+async def test_edge_scrolling_stops_when_leaving_the_tab_bar() -> None:
+    """A timer left running after the pointer leaves would scroll forever."""
+    from remotely.tui.app import SessionTabs
+    from textual import events
+
+    app = RemotelyApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _open_many(app, pilot, 12)
+        tabs = app.query_one("#tabs", SessionTabs)
+        # Opening tabs leaves the row scrolled to the last one; from there the
+        # right edge has nowhere to go and the timer correctly stops itself.
+        tabs.query_one("#tabs-scroll").scroll_to(x=0, animate=False, force=True)
+        await pilot.pause()
+
+        tabs._on_mouse_move(
+            events.MouseMove(widget=tabs, x=tabs.size.width - 1, y=0, delta_x=0,
+                             delta_y=0, button=0, shift=False, meta=False,
+                             ctrl=False, screen_x=0, screen_y=0)
+        )
+        await pilot.pause()
+        assert tabs._edge_timer is not None, "edge hover did not start scrolling"
+
+        tabs._on_leave(events.Leave(tabs))
+        await pilot.pause()
+        assert tabs._edge_timer is None, "scrolling continued after the pointer left"
+        app.sessions.close_all()
+
+
+async def test_same_theme_tabs_are_separated_by_borders() -> None:
+    """Adjacent tabs on one theme are a single block of colour without edges."""
+    from remotely.tui.app import SessionTab, SessionTabs
+
+    app = RemotelyApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _open_many(app, pilot, 3, theme="prod")
+
+        tabs = list(app.query(SessionTab))
+        assert len(tabs) == 3
+        for tab in tabs:
+            left = tab.styles.border_left
+            right = tab.styles.border_right
+            assert left[0] not in ("", "none", None), f"no left border: {left}"
+            assert right[0] not in ("", "none", None), f"no right border: {right}"
+            # Dark against the accent fill, so it reads as a divider.
+            assert left[1] != tab.styles.background
+            # A border occupies real cells, or it separates nothing.
+            assert tab.region.width > tab.size.width
+
+        app.sessions.close_all()
 
 
 async def test_connecting_uses_the_rich_dots_spinner() -> None:
