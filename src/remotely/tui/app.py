@@ -1021,14 +1021,20 @@ class RemotelyApp(App[None]):
 
     @work
     async def _request_close(self, session_id: str) -> None:
+        await self._close_with_confirm(session_id)
+
+    async def _close_with_confirm(self, session_id: str) -> bool:
         """Close a tab, confirming first when the preference asks for it.
 
         A dead session has nothing left to lose, so it closes straight away
         regardless - confirming there would be pure nagging.
+
+        Awaitable rather than a worker of its own so the sessions dialog can
+        close a tab and then carry on with its own loop.
         """
         session = self.sessions.get(session_id)
         if session is None:
-            return
+            return False
         if self.settings.confirm_close_tab and session.is_live:
             confirmed = await self.push_screen_wait(
                 ConfirmScreen(
@@ -1039,8 +1045,9 @@ class RemotelyApp(App[None]):
                 )
             )
             if not confirmed:
-                return
+                return False
         self._close_session(session_id)
+        return True
 
     # --------------------------------------------------------------- connecting
 
@@ -1330,21 +1337,24 @@ class RemotelyApp(App[None]):
             )
             if choice is None:
                 return
-            if choice == "!reload":
+            if choice.action == "reload":
                 self.themes.reload()
                 self._status("Themes reloaded.")
                 continue
+            selected = choice.selection
+            if selected is None:
+                continue
             name = await self.push_screen_wait(
                 TextPromptScreen(
-                    f"Clone '{choice}' as",
-                    value=f"{choice}-custom",
+                    f"Clone '{selected}' as",
+                    value=f"{selected}-custom",
                     help=f"Creates a new .toml in {config.themes_dir()}.",
                 )
             )
             if name is None:
                 continue
             try:
-                path = self.themes.copy_to_user_dir(choice, name)
+                path = self.themes.copy_to_user_dir(selected, name)
             except Exception as exc:
                 self._status(str(exc), error=True)
                 continue
@@ -1375,10 +1385,10 @@ class RemotelyApp(App[None]):
             )
             if choice is None:
                 return
-            if choice == "!lock":
+            if choice.action == "lock":
                 self._lock_vault()
                 return
-            if choice == "!new":
+            if choice.action == "new":
                 created = await self.push_screen_wait(CredentialFormScreen())
                 if created is not None:
                     try:
@@ -1387,8 +1397,10 @@ class RemotelyApp(App[None]):
                     except VaultError as exc:
                         self._status(str(exc), error=True)
                 continue
+            if choice.selection is None:
+                continue
 
-            existing = self.vault.get(choice)
+            existing = self.vault.get(choice.selection)
             if existing is None:
                 continue
             edited = await self.push_screen_wait(CredentialFormScreen(existing))
@@ -1404,40 +1416,64 @@ class RemotelyApp(App[None]):
 
     @work
     async def action_sessions(self) -> None:
-        sessions = self.sessions.list()
-        if not sessions:
-            self._status("No open sessions.")
-            return
-        choice = await self.push_screen_wait(
-            ListPickerScreen(
-                "Open sessions",
-                session_options(sessions),
-                help_text="Select a session to switch to it, or close the highlighted one.",
-                empty_text="No open sessions.",
-                extra_buttons=[("closeall", "Close all")],
-            )
-        )
-        if choice is None:
-            return
-        if choice == "!closeall":
-            live = [s for s in sessions if s.is_live]
-            # One prompt for the batch, not one per session.
-            if self.settings.confirm_close_tab and live:
-                confirmed = await self.push_screen_wait(
-                    ConfirmScreen(
-                        f"Close all {len(sessions)} sessions?",
-                        detail=f"{len(live)} are still connected. "
-                        "Turn this prompt off in /settings.",
-                        confirm_label="Close all",
-                    )
+        # Loops, because closing one tab is rarely the only thing you came to
+        # do: the dialog reopens on the remaining sessions instead of making
+        # you summon it again per tab.
+        while True:
+            sessions = self.sessions.list()
+            if not sessions:
+                self._status("No open sessions.")
+                return
+            choice = await self.push_screen_wait(
+                ListPickerScreen(
+                    "Open sessions",
+                    session_options(sessions),
+                    help_text=(
+                        "Select a session to switch to it, "
+                        "or close tabs without leaving here."
+                    ),
+                    empty_text="No open sessions.",
+                    extra_buttons=[
+                        ("closeone", "Close Selected Tab"),
+                        ("closeall", "Close All Tabs"),
+                    ],
                 )
-                if not confirmed:
+            )
+            if choice is None:
+                return
+            if choice.action == "closeall":
+                if await self._close_all_sessions(sessions):
                     return
-            for session in list(sessions):
-                self._close_session(session.id)
-            self._status("Closed all sessions.")
+                continue
+            if choice.action == "closeone":
+                if choice.selection is None:
+                    self._status("Highlight a session to close it.", error=True)
+                    continue
+                await self._close_with_confirm(choice.selection)
+                continue
+            if choice.selection:
+                self._switch_to(choice.selection)
             return
-        self._switch_to(choice)
+
+    async def _close_all_sessions(self, sessions: list[Session]) -> bool:
+        """Close every session, confirming once. False if the user backed out."""
+        live = [s for s in sessions if s.is_live]
+        # One prompt for the batch, not one per session.
+        if self.settings.confirm_close_tab and live:
+            confirmed = await self.push_screen_wait(
+                ConfirmScreen(
+                    f"Close all {len(sessions)} sessions?",
+                    detail=f"{len(live)} are still connected. "
+                    "Turn this prompt off in /settings.",
+                    confirm_label="Close all",
+                )
+            )
+            if not confirmed:
+                return False
+        for session in list(sessions):
+            self._close_session(session.id)
+        self._status("Closed all sessions.")
+        return True
 
     # ---------------------------------------------------------- import / export
 
@@ -1573,10 +1609,10 @@ class RemotelyApp(App[None]):
                     ),
                 )
             )
-            if choice is None or choice.startswith("!"):
+            if choice is None or choice.action or choice.selection is None:
                 return
             try:
-                new_value = self.settings.toggle(choice)
+                new_value = self.settings.toggle(choice.selection)
             except KeyError:
                 continue
             try:
@@ -1584,7 +1620,7 @@ class RemotelyApp(App[None]):
             except OSError as exc:
                 self._status(f"Could not save settings: {exc}", error=True)
                 return
-            label = settings_module.LABELS[choice][0]
+            label = settings_module.LABELS[choice.selection][0]
             self._status(f"{label}: {'on' if new_value else 'off'}.")
 
 

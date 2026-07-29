@@ -210,10 +210,15 @@ The input at the top is the only control surface. It completes as you type.
 /add              add a host               /vault           manage credentials
 /edit <host>      edit a host              /settings        change preferences
 /delete <host>    delete a host            /lock            lock the vault
-/sessions         list open sessions       /export <path>   export hosts
+/sessions         switch or close tabs     /export <path>   export hosts
 /close [host]     close a tab              /import <path>   import hosts
 /help  /quit
 ```
+
+`/sessions` (or `Ctrl+L`) lists the open tabs. Select one to switch to it, or
+use **Close Selected Tab** / **Close All Tabs** to close them without leaving -
+the list refreshes and stays open so you can close several in a row. **Ok**
+leaves the dialog and touches nothing.
 
 ## Configuration
 

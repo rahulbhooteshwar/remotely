@@ -20,6 +20,7 @@ from textual.widgets import (
     Select,
     Static,
 )
+from textual.widgets.button import ButtonVariant
 from textual.widgets.option_list import Option
 
 from ..models import Credential, Host, UNGROUPED
@@ -35,6 +36,21 @@ AGENT_CHOICE = "__agent__"
 NEW_PASSWORD_CHOICE = "__new_password__"
 NEW_KEY_CHOICE = "__new_key__"
 NEW_CHOICES = (NEW_PASSWORD_CHOICE, NEW_KEY_CHOICE)
+
+
+@dataclass(slots=True)
+class PickerResult:
+    """A choice made in :class:`ListPickerScreen`.
+
+    ``action`` is empty when a row itself was activated, otherwise it is the id
+    of the button that was pressed. ``selection`` is the row the result applies
+    to: the activated one, or - when a button fired - whichever row was
+    highlighted at the time. That second case is what lets a dialog offer a
+    button that acts on "the selected thing".
+    """
+
+    action: str = ""
+    selection: str | None = None
 
 
 @dataclass(slots=True)
@@ -54,6 +70,24 @@ def _field(label: str, widget) -> Vertical:
     """A labelled form row."""
     box = Vertical(Label(label, classes="field-label"), widget, classes="field")
     return box
+
+
+def _button(label: str, *, id: str, variant: ButtonVariant = "default") -> Button:
+    """A dialog button, one row tall instead of three.
+
+    ``compact`` is what does the shrinking, and it has to be the widget flag
+    rather than a rule in app.tcss: Textual's default button is three rows
+    because ``-style-default`` draws ``tall`` top and bottom borders, and its
+    hover and focus rules redraw them at higher specificity - so a border
+    override in our stylesheet would let the button spring back to three rows
+    the moment the pointer touched it. The compact flag sets
+    ``border: none !important``, which holds in every state. Horizontal padding
+    is untouched; only the wasted rows go.
+
+    Every dialog button goes through here so a new one cannot quietly be the
+    odd tall one out.
+    """
+    return Button(label, variant=variant, id=id, compact=True)
 
 
 class CompactOnSmall:
@@ -120,9 +154,12 @@ class PasscodeScreen(ModalScreen[str | None]):
                     classes="modal-footnote",
                 )
             with Horizontal(classes="modal-buttons"):
-                yield Button("Cancel", id="cancel")
-                yield Button("Unlock" if not self.creating else "Create",
-                             variant="primary", id="ok")
+                yield _button("Cancel", id="cancel")
+                yield _button(
+                    "Unlock" if not self.creating else "Create",
+                    id="ok",
+                    variant="primary",
+                )
 
     def on_mount(self) -> None:
         self.query_one("#passcode", Input).focus()
@@ -175,8 +212,8 @@ class ConfirmScreen(ModalScreen[bool]):
             if self.detail:
                 yield Static(self.detail, classes="modal-help")
             with Horizontal(classes="modal-buttons"):
-                yield Button("Cancel", id="cancel")
-                yield Button(self.confirm_label, variant="error", id="confirm")
+                yield _button("Cancel", id="cancel")
+                yield _button(self.confirm_label, id="confirm", variant="error")
 
     def on_mount(self) -> None:
         self.query_one("#confirm", Button).focus()
@@ -212,8 +249,8 @@ class TextPromptScreen(ModalScreen[str | None]):
                 yield Static(self.help_text, classes="modal-help")
             yield Input(value=self.initial, placeholder=self.placeholder, id="value")
             with Horizontal(classes="modal-buttons"):
-                yield Button("Cancel", id="cancel")
-                yield Button("OK", variant="primary", id="ok")
+                yield _button("Cancel", id="cancel")
+                yield _button("OK", id="ok", variant="primary")
 
     def on_mount(self) -> None:
         self.query_one("#value", Input).focus()
@@ -389,8 +426,8 @@ class HostFormScreen(CompactOnSmall, ModalScreen[HostFormResult | None]):
                 )
             yield Static("", id="form-error", classes="error")
             with Horizontal(classes="modal-buttons"):
-                yield Button("Cancel", id="cancel")
-                yield Button("Save", variant="primary", id="save")
+                yield _button("Cancel", id="cancel")
+                yield _button("Save", id="save", variant="primary")
 
     def on_mount(self) -> None:
         self._sync_auth_fields()
@@ -588,8 +625,8 @@ class CredentialFormScreen(CompactOnSmall, ModalScreen[Credential | None]):
                 )
             yield Static("", id="cred-error", classes="error")
             with Horizontal(classes="modal-buttons"):
-                yield Button("Cancel", id="cancel")
-                yield Button("Save", variant="primary", id="save")
+                yield _button("Cancel", id="cancel")
+                yield _button("Save", id="save", variant="primary")
 
     def on_mount(self) -> None:
         self.query_one("#name", Input).focus()
@@ -625,8 +662,8 @@ class CredentialFormScreen(CompactOnSmall, ModalScreen[Credential | None]):
         self.dismiss(None)
 
 
-class ListPickerScreen(ModalScreen[str | None]):
-    """Generic list browser returning the chosen option id."""
+class ListPickerScreen(ModalScreen[PickerResult | None]):
+    """Generic list browser returning the chosen option, or a button press."""
 
     BINDINGS = [Binding("escape", "dismiss_none", "Close")]
 
@@ -638,6 +675,7 @@ class ListPickerScreen(ModalScreen[str | None]):
         help_text: str = "",
         empty_text: str = "Nothing here yet.",
         extra_buttons: Sequence[tuple[str, str]] = (),
+        dismiss_label: str = "Ok",
     ) -> None:
         super().__init__()
         self.title_text = title
@@ -645,6 +683,7 @@ class ListPickerScreen(ModalScreen[str | None]):
         self.help_text = help_text
         self.empty_text = empty_text
         self.extra_buttons = list(extra_buttons)
+        self.dismiss_label = dismiss_label
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal modal-wide"):
@@ -656,25 +695,45 @@ class ListPickerScreen(ModalScreen[str | None]):
             else:
                 yield Static(self.empty_text, classes="modal-help empty")
             with Horizontal(classes="modal-buttons"):
-                yield Button("Close", id="cancel")
                 for button_id, label in self.extra_buttons:
-                    yield Button(label, id=button_id)
+                    yield _button(label, id=button_id)
+                # Last, so the buttons that act on the list come first and the
+                # way out sits where the eye finishes. It is also named for what
+                # it does - leave the dialog - because in a dialog full of
+                # closable things "Close" reads as "close the highlighted one".
+                yield _button(self.dismiss_label, id="cancel")
 
     def on_mount(self) -> None:
         if self.options:
             self.query_one("#picker", OptionList).focus()
 
+    def _highlighted(self) -> str | None:
+        """Id of the row under the cursor, for buttons that act on a row."""
+        try:
+            picker = self.query_one("#picker", OptionList)
+        except NoMatches:  # the empty-list placeholder is showing instead
+            return None
+        index = picker.highlighted
+        if index is None:
+            return None
+        try:
+            return picker.get_option_at_index(index).id
+        except IndexError:  # the list shrank under us
+            return None
+
     @on(OptionList.OptionSelected, "#picker")
     def _selected(self, event: OptionList.OptionSelected) -> None:
         if event.option.id:
-            self.dismiss(event.option.id)
+            self.dismiss(PickerResult(selection=event.option.id))
 
     @on(Button.Pressed)
-    def _button(self, event: Button.Pressed) -> None:
+    def _pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
             self.dismiss(None)
         elif event.button.id:
-            self.dismiss(f"!{event.button.id}")
+            self.dismiss(
+                PickerResult(action=event.button.id, selection=self._highlighted())
+            )
 
     def action_dismiss_none(self) -> None:
         self.dismiss(None)
@@ -701,7 +760,7 @@ class HostDetailScreen(CompactOnSmall, ModalScreen[None]):
             with VerticalScroll(classes="form-scroll"):
                 yield Static(self.body, id="detail-body")
             with Horizontal(classes="modal-buttons"):
-                yield Button("Close", variant="primary", id="cancel")
+                yield _button("Close", id="cancel", variant="primary")
 
     @on(Button.Pressed, "#cancel")
     def _close(self) -> None:
@@ -785,7 +844,7 @@ class HelpScreen(CompactOnSmall, ModalScreen[None]):
             with VerticalScroll(classes="form-scroll"):
                 yield Static(self.HELP, id="help-body")
             with Horizontal(classes="modal-buttons"):
-                yield Button("Close", variant="primary", id="cancel")
+                yield _button("Close", id="cancel", variant="primary")
 
     def on_mount(self) -> None:
         self.query_one("#cancel", Button).focus()

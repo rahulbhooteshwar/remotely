@@ -1772,7 +1772,7 @@ async def test_closing_a_dead_tab_does_not_prompt() -> None:
 
 async def test_settings_command_persists_a_toggle() -> None:
     from remotely import settings as settings_module
-    from remotely.tui.screens import ListPickerScreen
+    from remotely.tui.screens import ListPickerScreen, PickerResult
 
     app = build_app()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -1786,7 +1786,7 @@ async def test_settings_command_persists_a_toggle() -> None:
                 break
         assert isinstance(app.screen, ListPickerScreen), "settings list did not open"
 
-        app.screen.dismiss("confirm_quit")
+        app.screen.dismiss(PickerResult(selection="confirm_quit"))
         for _ in range(20):
             await pilot.pause()
 
@@ -2346,3 +2346,175 @@ async def test_the_status_line_names_the_credential_it_created() -> None:
         banner = app.query_one("#status", Static)
         text = "".join(seg.text for seg in banner.render_line(0))
         assert "metrics" in text and "cred-metrics" in text, text
+
+
+# ---------------------------------------------------------- dialog buttons
+
+
+async def _two_dead_sessions(app, pilot) -> list:
+    """Open two sessions and mark them finished, so closing never prompts."""
+    for host in ("prod-web", "prod-db"):
+        app._connect(host)
+    for _ in range(200):
+        await pilot.pause()
+        if len(app.sessions.list()) == 2:
+            break
+    sessions = app.sessions.list()
+    assert len(sessions) == 2, f"expected 2 sessions, got {len(sessions)}"
+    for session in sessions:
+        session.status = "closed"
+    return sessions
+
+
+async def _open_sessions_dialog(app, pilot):
+    from remotely.tui.screens import ListPickerScreen
+
+    app._run_command("sessions", "")
+    for _ in range(30):
+        await pilot.pause()
+        if isinstance(app.screen, ListPickerScreen):
+            break
+    assert isinstance(app.screen, ListPickerScreen), "sessions dialog did not open"
+    return app.screen
+
+
+async def test_dialog_buttons_are_one_row_tall() -> None:
+    """Textual's default button is three rows; dialogs cannot afford that.
+
+    Checked after focus and hover too: the border that makes a button tall is
+    redrawn by Button's own :hover/:focus rules, so a fix that only overrode
+    the resting state would spring back the moment the pointer arrived.
+    """
+    from textual.widgets import Button
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _two_dead_sessions(app, pilot)
+        screen = await _open_sessions_dialog(app, pilot)
+
+        buttons = list(screen.query(Button))
+        assert buttons, "dialog has no buttons"
+        for button in buttons:
+            assert button.region.height == 1, (
+                f"{button.label} is {button.region.height} rows tall"
+            )
+
+        buttons[0].focus()
+        await pilot.hover(buttons[-1])
+        for _ in range(8):
+            await pilot.pause()
+        for button in buttons:
+            assert button.region.height == 1, (
+                f"{button.label} grew to {button.region.height} rows when active"
+            )
+
+
+async def test_sessions_dialog_names_its_buttons_and_ends_with_ok() -> None:
+    from textual.widgets import Button
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _two_dead_sessions(app, pilot)
+        screen = await _open_sessions_dialog(app, pilot)
+
+        ordered = [
+            (b.id, str(b.label))
+            for b in sorted(screen.query(Button), key=lambda b: b.region.x)
+        ]
+        assert ordered == [
+            ("closeone", "Close Selected Tab"),
+            ("closeall", "Close All Tabs"),
+            ("cancel", "Ok"),
+        ], ordered
+
+
+async def test_close_selected_tab_closes_the_highlighted_session() -> None:
+    """The old Close button only shut the dialog, despite what the title said."""
+    from textual.widgets import Button, OptionList
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sessions = await _two_dead_sessions(app, pilot)
+        screen = await _open_sessions_dialog(app, pilot)
+
+        picker = screen.query_one("#picker", OptionList)
+        picker.highlighted = 1
+        for _ in range(6):
+            await pilot.pause()
+        doomed = picker.get_option_at_index(1).id
+        survivor = next(s.id for s in sessions if s.id != doomed)
+
+        screen.query_one("#closeone", Button).press()
+        for _ in range(30):
+            await pilot.pause()
+            if app.sessions.get(doomed) is None:
+                break
+
+        assert app.sessions.get(doomed) is None, "the highlighted tab is still open"
+        assert app.sessions.get(survivor) is not None, "closed the wrong tab"
+
+
+async def test_the_dialog_stays_open_after_closing_one_tab() -> None:
+    """Closing tabs one at a time should not mean reopening the dialog each time."""
+    from remotely.tui.screens import ListPickerScreen
+    from textual.widgets import Button
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _two_dead_sessions(app, pilot)
+        screen = await _open_sessions_dialog(app, pilot)
+
+        screen.query_one("#closeone", Button).press()
+        for _ in range(30):
+            await pilot.pause()
+            if len(app.sessions.list()) == 1:
+                break
+        assert len(app.sessions.list()) == 1
+
+        for _ in range(20):
+            await pilot.pause()
+            if isinstance(app.screen, ListPickerScreen):
+                break
+        assert isinstance(app.screen, ListPickerScreen), "dialog closed after one tab"
+        assert len(app.screen.options) == 1, "the list was not refreshed"
+
+
+async def test_ok_leaves_the_dialog_without_touching_any_tab() -> None:
+    from textual.widgets import Button
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _two_dead_sessions(app, pilot)
+        screen = await _open_sessions_dialog(app, pilot)
+
+        screen.query_one("#cancel", Button).press()
+        for _ in range(25):
+            await pilot.pause()
+
+        assert len(app.sessions.list()) == 2, "Ok must not close tabs"
+        assert app.screen is app.screen.app.screen_stack[-1]
+        from remotely.tui.screens import ListPickerScreen
+
+        assert not isinstance(app.screen, ListPickerScreen), "dialog stayed open"
+
+
+async def test_close_all_tabs_closes_every_session() -> None:
+    from textual.widgets import Button
+
+    app = build_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _two_dead_sessions(app, pilot)
+        screen = await _open_sessions_dialog(app, pilot)
+
+        screen.query_one("#closeall", Button).press()
+        for _ in range(30):
+            await pilot.pause()
+            if not app.sessions.list():
+                break
+        assert app.sessions.list() == []

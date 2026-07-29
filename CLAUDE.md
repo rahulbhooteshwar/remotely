@@ -200,6 +200,29 @@ parametrised over sizes down to 50x12. Verify layout changes by rendering
 (`screen._compositor.render_strips()`), not by widget geometry alone — the
 width bug was invisible in a geometry-only probe run at 100 columns.
 
+Every dialog button is built by `screens._button()`, which passes
+`compact=True`. Do not instantiate `Button` directly in a dialog, and do not
+try to shrink it from `app.tcss`: Textual's `-style-default` makes a button
+three rows with `tall` top and bottom borders, and its `:hover`/`:focus` rules
+redraw them at higher specificity, so a stylesheet override springs back the
+moment the pointer lands. `compact` sets `border: none !important`, which holds
+in every state. `test_dialog_buttons_are_one_row_tall` checks the resting,
+focused and hovered heights for that reason.
+
+### The picker dialog's result
+
+`ListPickerScreen` returns a `PickerResult`, not a string: `action` is empty
+when a row was activated and otherwise names the button pressed, while
+`selection` is the row it applies to — the activated one, or whichever was
+highlighted when a button fired. That second case is the whole point; it is
+what lets the sessions dialog offer "Close Selected Tab". `None` still means
+dismissed.
+
+The dismiss button is labelled **Ok** and composed last, so buttons that act on
+the list come first. It used to be a leading "Close", which in a dialog full of
+closable things read as "close the highlighted tab" while actually closing only
+the dialog.
+
 ### Disconnect overlay and retry
 
 A dead session (`error` or `closed`) draws a centred panel over the pane —
