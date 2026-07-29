@@ -334,6 +334,28 @@ reveals its fields (`display` is toggled on containers that stay mounted —
 `mount()` is async, so building them on demand would race a save in the same
 tick).
 
+A new host defaults to `NEW_PASSWORD_CHOICE`; editing always opens on the auth
+the host already has. Two non-obvious things hold that together:
+
+- Textual posts a `Select.Changed` when the Select mounts, echoing the value we
+  gave it. `_auth_changed` focuses the field a choice reveals, so without a
+  guard that echo would pull the cursor out of the Name field on a form nobody
+  had touched. `_last_auth` records what is already on screen and the handler
+  ignores a "change" to the same value.
+- Scrolling the revealed field into view **cannot** be done at the moment of the
+  toggle. The section is shown by flipping `display`, and the layout that gives
+  the field a region lands later — `scroll_to_widget` against an empty region
+  returns False and does nothing, and chained `call_after_refresh` hops do not
+  help because they all drain in one batch before the layout runs. `Show` fires
+  once the region is real, which is why `RevealedInput` handles its own (`Show`
+  does not bubble). Its `reveal_on_show` flag exists so the `Show` that arrives
+  when the dialog merely opens does not yank the view.
+
+`test_opening_the_form_leaves_the_cursor_in_the_name_field` and
+`test_choosing_a_new_credential_reveals_and_focuses_its_field` cover both. The
+second one switches to **key first** on purpose: the form already opens on
+password, and assigning a Select the value it holds posts nothing.
+
 The split of responsibility is deliberate and load-bearing:
 
 - `HostFormScreen` **cannot** write to the vault. It returns a `HostFormResult`

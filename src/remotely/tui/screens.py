@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Iterable, Sequence
 
-from textual import on
+from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -70,6 +70,31 @@ def _field(label: str, widget) -> Vertical:
     """A labelled form row."""
     box = Vertical(Label(label, classes="field-label"), widget, classes="field")
     return box
+
+
+class RevealedInput(Input):
+    """An input in a collapsible section that scrolls itself into view.
+
+    Its section is shown by toggling ``display``, and the layout that gives the
+    widget a region only lands afterwards - so nothing at the moment of the
+    toggle can scroll to it. ``scroll_to_widget`` against an empty region
+    returns False and does nothing, and a chain of ``call_after_refresh`` hops
+    is no help either: they all drain in one batch, before the layout runs.
+
+    Textual posts ``Show`` once the region is real, which is exactly when the
+    scroll can work. It does not bubble, so the widget has to handle its own.
+    """
+
+    #: Set by the form when the user picked the mode this field belongs to, so
+    #: a Show from any other cause - the dialog simply opening - does not yank
+    #: the view away from wherever the user was.
+    reveal_on_show = False
+
+    def _on_show(self, event: events.Show) -> None:
+        if not self.reveal_on_show:
+            return
+        self.reveal_on_show = False
+        self.scroll_visible(animate=False)
 
 
 def _button(label: str, *, id: str, variant: ButtonVariant = "default") -> Button:
@@ -298,6 +323,10 @@ class HostFormScreen(CompactOnSmall, ModalScreen[HostFormResult | None]):
         self.credential_names = list(credentials)
         self.known_groups = list(groups)
         self.vault_locked = vault_locked
+        #: The auth choice already reflected on screen. Set in compose, then
+        #: used to tell a real change from the Changed message Textual posts
+        #: when the Select first mounts.
+        self._last_auth = ""
 
     def compose(self) -> ComposeResult:
         host = self.original
@@ -350,7 +379,11 @@ class HostFormScreen(CompactOnSmall, ModalScreen[HostFormResult | None]):
                     ("ssh key based (saved in vault)", NEW_KEY_CHOICE),
                 ]
                 auth_options += [(f"credential: {n}", n) for n in self.credential_names]
-                current_auth = AGENT_CHOICE
+                # A new host starts on password auth, the overwhelmingly common
+                # case. Editing never second-guesses what the host already uses:
+                # an agent-auth host opens on agent, not on a blank password
+                # field that would look like something needed filling in.
+                current_auth = AGENT_CHOICE if host else NEW_PASSWORD_CHOICE
                 if host and host.auth_mode == "credential" and host.credential:
                     if host.credential in self.credential_names:
                         current_auth = host.credential
@@ -360,6 +393,7 @@ class HostFormScreen(CompactOnSmall, ModalScreen[HostFormResult | None]):
                         auth_options.append((f"credential: {host.credential}", host.credential))
                         current_auth = host.credential
                 auth_options.append(("ssh agent / default keys", AGENT_CHOICE))
+                self._last_auth = current_auth
                 yield _field(
                     "Authentication",
                     Select(auth_options, value=current_auth, allow_blank=False, id="auth"),
@@ -376,11 +410,11 @@ class HostFormScreen(CompactOnSmall, ModalScreen[HostFormResult | None]):
                 # so a form saved in the same tick as the change would read
                 # fields that do not exist yet.
                 with Vertical(id="new-password-fields"):
-                    yield _field("Password", Input(password=True, id="new_password"))
+                    yield _field("Password", RevealedInput(password=True, id="new_password"))
                 with Vertical(id="new-key-fields"):
                     yield _field(
                         "Key path",
-                        Input(placeholder="~/.ssh/id_ed25519", id="new_key_path"),
+                        RevealedInput(placeholder="~/.ssh/id_ed25519", id="new_key_path"),
                     )
                     yield _field(
                         "Key passphrase (optional)",
@@ -448,21 +482,30 @@ class HostFormScreen(CompactOnSmall, ModalScreen[HostFormResult | None]):
     @on(Select.Changed, "#auth")
     def _auth_changed(self) -> None:
         self._sync_auth_fields()
+        choice = self._auth_choice()
+        previous, self._last_auth = self._last_auth, choice
+        if choice == previous:
+            # Textual posts Changed when the Select mounts, echoing the value
+            # we gave it. Now that a new host opens on password auth, treating
+            # that echo as a user action would snatch the cursor out of the
+            # Name field before the form had even been touched.
+            return
         # The revealed field sits well below the fold on a full-length form, so
         # picking "password based" would otherwise look like it did nothing.
-        # Focusing scrolls it into view and leaves the cursor ready to type.
-        field = {
+        # The field scrolls itself into view once it has a region (see
+        # RevealedInput); focus can be given straight away.
+        selector = {
             NEW_PASSWORD_CHOICE: "#new_password",
             NEW_KEY_CHOICE: "#new_key_path",
-        }.get(self._auth_choice())
-        if field is not None:
-            self.call_after_refresh(self._focus_field, field)
-
-    def _focus_field(self, selector: str) -> None:
+        }.get(choice)
+        if selector is None:
+            return
         try:
-            self.query_one(selector, Input).focus()
-        except NoMatches:  # the form closed before the refresh landed
-            pass
+            field = self.query_one(selector, RevealedInput)
+        except NoMatches:  # pragma: no cover - both fields are always composed
+            return
+        field.reveal_on_show = True
+        field.focus()
 
     def _draft_credential(self) -> Credential | None:
         """The vault entry to create, or ``None`` when auth needs no new one.

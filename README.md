@@ -123,7 +123,7 @@ ctrl+n                 -> new host form
                           group     Production
                           tags      web, critical
                           theme     prod
-                          auth      password based (saved in vault)
+                          auth      password based (saved in vault)  <- default
                           password  ••••••••
 prod                   -> fuzzy search finds it
 enter                  -> connects
@@ -269,6 +269,10 @@ The first two are shortcuts for "I do not want to visit `/vault` first". Saving
 prompts for the vault passcode if the vault is locked, and if you cancel that
 prompt neither the credential nor the host is written - so a host can never end
 up pointing at a credential that does not exist.
+
+A **new** host opens on `password based`, with the password field ready below
+it. **Editing** never second-guesses a host: the dropdown opens on whatever that
+host authenticates with today.
 
 The optional **Save credential as** field names the new entry so other hosts can
 share it. Leave it blank and the name is derived from the host: `cred-prod-web`,

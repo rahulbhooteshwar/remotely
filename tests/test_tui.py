@@ -2018,10 +2018,71 @@ async def test_auth_dropdown_leads_with_new_credentials_and_ends_with_agent() ->
             "ldap",
             AGENT_CHOICE,
         ]
-        # Creating a host still defaults to the option that needs no input.
+        # A new host opens on password auth: it is the common case, and the
+        # dropdown's order says so.
         from textual.widgets import Select
 
-        assert screen.query_one("#auth", Select).value == AGENT_CHOICE
+        assert screen.query_one("#auth", Select).value == NEW_PASSWORD_CHOICE
+
+
+async def test_editing_opens_on_the_auth_the_host_already_uses() -> None:
+    """The password default is for new hosts only.
+
+    An agent-auth host must not open on a blank password field - that reads as
+    something needing to be filled in, and saving would change how it connects.
+    """
+    from remotely.models import Credential, Host
+    from remotely.tui.screens import AGENT_CHOICE
+    from textual.widgets import Select
+
+    from .conftest import PASSCODE
+
+    app = build_app()
+    app.vault.initialise(PASSCODE)
+    app.vault.put(Credential(name="ldap", kind="password", password="x"))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        for auth_mode, credential, expected in (
+            ("agent", None, AGENT_CHOICE),
+            ("credential", "ldap", "ldap"),
+        ):
+            host = Host(
+                name="box",
+                hostname="10.0.0.9",
+                username="root",
+                auth_mode=auth_mode,
+                credential=credential,
+            )
+            screen = await _open_host_form(app, pilot, host)
+            assert screen.query_one("#auth", Select).value == expected
+            assert not screen.query_one("#new-password-fields").display
+            screen.dismiss(None)
+            for _ in range(12):
+                await pilot.pause()
+
+
+async def test_opening_the_form_leaves_the_cursor_in_the_name_field() -> None:
+    """Textual echoes a Changed when the Select mounts.
+
+    Now that the echo carries "password based", treating it as a user choice
+    would focus the password field on a form the user has not touched yet.
+    """
+    app = build_app()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        screen = await _open_host_form(app, pilot)
+        for _ in range(15):
+            await pilot.pause()
+        assert app.focused is not None and app.focused.id == "name", (
+            f"focus landed on {app.focused} instead of the name field"
+        )
+        assert screen.query_one("#new-password-fields").display, (
+            "the password field should still be showing"
+        )
+        # RevealedInput also gets a Show on mount; it must not scroll then.
+        assert screen.query_one(".form-scroll").scroll_y == 0, (
+            "the form opened part-way down"
+        )
 
 
 async def test_auth_choice_shows_only_the_fields_it_needs() -> None:
@@ -2043,22 +2104,14 @@ async def test_auth_choice_shows_only_the_fields_it_needs() -> None:
                 )
             }
 
-        assert shown() == {
-            "new-password-fields": False,
-            "new-key-fields": False,
-            "new-cred-name-fields": False,
-        }, "agent auth must not ask for a secret"
-
-        select = screen.query_one("#auth", Select)
-        select.value = NEW_PASSWORD_CHOICE
-        for _ in range(6):
-            await pilot.pause()
+        # A new host opens on password auth, so those fields start visible.
         assert shown() == {
             "new-password-fields": True,
             "new-key-fields": False,
             "new-cred-name-fields": True,
         }
 
+        select = screen.query_one("#auth", Select)
         select.value = NEW_KEY_CHOICE
         for _ in range(6):
             await pilot.pause()
@@ -2071,7 +2124,16 @@ async def test_auth_choice_shows_only_the_fields_it_needs() -> None:
         select.value = AGENT_CHOICE
         for _ in range(6):
             await pilot.pause()
-        assert not any(shown().values())
+        assert not any(shown().values()), "agent auth must not ask for a secret"
+
+        select.value = NEW_PASSWORD_CHOICE
+        for _ in range(6):
+            await pilot.pause()
+        assert shown() == {
+            "new-password-fields": True,
+            "new-key-fields": False,
+            "new-cred-name-fields": True,
+        }
 
 
 async def test_new_credential_fields_are_validated_before_save() -> None:
@@ -2315,9 +2377,11 @@ async def test_choosing_a_new_credential_reveals_and_focuses_its_field() -> None
         select = screen.query_one("#auth", Select)
         scroll = screen.query_one(".form-scroll")
 
+        # Key first: the form already opens on password, and setting a Select
+        # to the value it holds posts nothing, so that would test nothing.
         for choice, field_id in (
-            (NEW_PASSWORD_CHOICE, "new_password"),
             (NEW_KEY_CHOICE, "new_key_path"),
+            (NEW_PASSWORD_CHOICE, "new_password"),
         ):
             select.value = choice
             for _ in range(15):
