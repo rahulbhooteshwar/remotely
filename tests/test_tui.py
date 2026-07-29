@@ -2582,3 +2582,248 @@ async def test_close_all_tabs_closes_every_session() -> None:
             if not app.sessions.list():
                 break
         assert app.sessions.list() == []
+
+
+# ------------------------------------------------------- vault: delete + rename
+
+
+def _vault_app():
+    """An app with two credentials, one shared by two hosts and one orphan."""
+    from remotely.models import Credential, Host
+
+    from .conftest import PASSCODE
+
+    app = RemotelyApp()
+    app.vault.initialise(PASSCODE)
+    app.vault.put(Credential(name="ldap", kind="password", password="x"))
+    app.vault.put(Credential(name="orphan", kind="password", password="y"))
+    for name in ("web1", "web2"):
+        app.store.add(
+            Host(name=name, hostname="10.0.0.5", username="u",
+                 auth_mode="credential", credential="ldap")
+        )
+    return app
+
+
+async def _open_vault(app, pilot):
+    from remotely.tui.screens import CredentialListScreen
+
+    app.action_vault()
+    for _ in range(30):
+        await pilot.pause()
+        if isinstance(app.screen, CredentialListScreen):
+            break
+    assert isinstance(app.screen, CredentialListScreen), "vault dialog did not open"
+    return app.screen
+
+
+def _delete_icon(screen, name):
+    from remotely.tui.screens import CredentialDeleteIcon, CredentialRow
+
+    for row in screen.query(CredentialRow):
+        if row.credential.name == name:
+            return row.query_one(CredentialDeleteIcon)
+    raise AssertionError(f"no row for {name}")
+
+
+def _row(screen, name):
+    from remotely.tui.screens import CredentialRow
+
+    for row in screen.query(CredentialRow):
+        if row.credential.name == name:
+            return row
+    raise AssertionError(f"no row for {name}")
+
+
+async def test_every_credential_row_shows_its_host_count() -> None:
+    from remotely.tui.screens import CredentialRow
+
+    app = _vault_app()
+    async with app.run_test(size=(96, 32)) as pilot:
+        await pilot.pause()
+        screen = await _open_vault(app, pilot)
+        counts = {r.credential.name: r.used_by for r in screen.query(CredentialRow)}
+        assert counts == {"ldap": 2, "orphan": 0}
+
+
+async def test_deleting_an_unused_credential_asks_first_then_removes_it() -> None:
+    from remotely.tui.screens import ConfirmScreen, CredentialListScreen
+
+    app = _vault_app()
+    async with app.run_test(size=(96, 32)) as pilot:
+        await pilot.pause()
+        screen = await _open_vault(app, pilot)
+        await pilot.click(_delete_icon(screen, "orphan"))
+        for _ in range(25):
+            await pilot.pause()
+
+        assert isinstance(app.screen, ConfirmScreen), "no confirmation was shown"
+        app.screen.dismiss(True)
+        for _ in range(30):
+            await pilot.pause()
+
+        assert app.vault.names() == ["ldap"]
+        assert isinstance(app.screen, CredentialListScreen), "dialog did not reopen"
+
+
+async def test_the_delete_icon_does_not_also_open_the_edit_form() -> None:
+    """The icon sits on top of a row whose own click opens the editor."""
+    from remotely.tui.screens import (
+        ConfirmScreen,
+        CredentialFormScreen,
+        CredentialListScreen,
+    )
+
+    app = _vault_app()
+    async with app.run_test(size=(96, 32)) as pilot:
+        await pilot.pause()
+        screen = await _open_vault(app, pilot)
+        await pilot.click(_delete_icon(screen, "orphan"))
+        for _ in range(25):
+            await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+
+        app.screen.dismiss(False)  # changed my mind
+        for _ in range(30):
+            await pilot.pause()
+
+        assert not isinstance(app.screen, CredentialFormScreen), (
+            "the click leaked through to the row and opened the editor"
+        )
+        assert isinstance(app.screen, CredentialListScreen)
+        assert app.vault.names() == ["ldap", "orphan"], "nothing should have changed"
+
+
+async def test_a_credential_in_use_is_refused_and_offers_editing_instead() -> None:
+    from remotely.tui.screens import ConfirmScreen, CredentialFormScreen
+
+    app = _vault_app()
+    async with app.run_test(size=(96, 32)) as pilot:
+        await pilot.pause()
+        screen = await _open_vault(app, pilot)
+        await pilot.click(_delete_icon(screen, "ldap"))
+        for _ in range(25):
+            await pilot.pause()
+
+        assert isinstance(app.screen, ConfirmScreen)
+        title = "".join(
+            seg.text for seg in app.screen.query(".modal-title")[0].render_line(0)
+        )
+        assert "2 hosts" in title, title
+        body = " ".join(
+            "".join(seg.text for seg in app.screen.query(".modal-help")[0].render_line(i))
+            for i in range(4)
+        )
+        assert "web1" in body and "web2" in body, body
+
+        app.screen.dismiss(True)  # "Edit instead"
+        for _ in range(30):
+            await pilot.pause()
+
+        assert isinstance(app.screen, CredentialFormScreen), "should offer the editor"
+        assert "ldap" in app.vault.names(), "the credential must survive"
+
+
+async def test_renaming_a_credential_repoints_every_host_that_used_it() -> None:
+    """hosts.json stores the name, so a rename would otherwise dangle them."""
+    from remotely.tui.screens import CredentialFormScreen
+    from textual.widgets import Input, Static
+
+    app = _vault_app()
+    async with app.run_test(size=(96, 32)) as pilot:
+        await pilot.pause()
+        screen = await _open_vault(app, pilot)
+        await pilot.click(_row(screen, "ldap"))
+        for _ in range(25):
+            await pilot.pause()
+        assert isinstance(app.screen, CredentialFormScreen)
+
+        app.screen.query_one("#name", Input).value = "corp-ldap"
+        app.screen.action_save()
+        for _ in range(30):
+            await pilot.pause()
+
+        assert sorted(app.vault.names()) == ["corp-ldap", "orphan"]
+        assert [h.credential for h in app.store] == ["corp-ldap", "corp-ldap"]
+
+        status = app.query_one("#status", Static)
+        text = "".join(seg.text for seg in status.render_line(0))
+        assert "corp-ldap" in text and "2 hosts" in text, text
+
+
+async def test_renaming_to_a_taken_name_is_refused_on_the_form() -> None:
+    from remotely.tui.screens import CredentialFormScreen
+    from textual.widgets import Input, Static
+
+    app = _vault_app()
+    async with app.run_test(size=(96, 32)) as pilot:
+        await pilot.pause()
+        screen = await _open_vault(app, pilot)
+        await pilot.click(_row(screen, "orphan"))
+        for _ in range(25):
+            await pilot.pause()
+        form = app.screen
+        assert isinstance(form, CredentialFormScreen)
+
+        form.query_one("#name", Input).value = "LDAP"  # vault matches case blind
+        form.action_save()
+        for _ in range(10):
+            await pilot.pause()
+
+        assert app.screen is form, "the form should stay open"
+        error = "".join(
+            seg.text for seg in form.query_one("#cred-error", Static).render_line(0)
+        )
+        assert "already exists" in error, error
+        assert sorted(app.vault.names()) == ["ldap", "orphan"]
+        assert app.vault.require("ldap").password == "x", "the other one was clobbered"
+
+
+async def test_a_new_credential_cannot_take_an_existing_name() -> None:
+    from remotely.tui.screens import CredentialFormScreen
+    from textual.widgets import Button, Input, Static
+
+    app = _vault_app()
+    async with app.run_test(size=(96, 32)) as pilot:
+        await pilot.pause()
+        screen = await _open_vault(app, pilot)
+        screen.query_one("#new", Button).press()
+        for _ in range(25):
+            await pilot.pause()
+        form = app.screen
+        assert isinstance(form, CredentialFormScreen)
+
+        form.query_one("#name", Input).value = "ldap"
+        form.query_one("#password", Input).value = "different"
+        form.action_save()
+        for _ in range(10):
+            await pilot.pause()
+
+        assert app.screen is form
+        error = "".join(
+            seg.text for seg in form.query_one("#cred-error", Static).render_line(0)
+        )
+        assert "already exists" in error, error
+        assert app.vault.require("ldap").password == "x"
+
+
+async def test_keyboard_can_reach_and_delete_a_credential() -> None:
+    """The row list replaced an OptionList, so arrows must still work."""
+    from remotely.tui.screens import ConfirmScreen, CredentialRow
+
+    app = _vault_app()
+    async with app.run_test(size=(96, 32)) as pilot:
+        await pilot.pause()
+        screen = await _open_vault(app, pilot)
+        rows = list(screen.query(CredentialRow))
+        assert app.focused is rows[0], "the first row should start focused"
+
+        await pilot.press("down")
+        for _ in range(6):
+            await pilot.pause()
+        assert app.focused is rows[1]
+
+        await pilot.press("delete")
+        for _ in range(25):
+            await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)

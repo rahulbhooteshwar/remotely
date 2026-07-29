@@ -345,6 +345,69 @@ OptionList > .option-list--option-highlighted {
     text-style: bold;
 }
 
+/* Credential rows. Two lines each, like a launcher tile, with the delete
+   control as its own widget at the right edge so the clickable cells and the
+   drawn glyph cannot drift apart. */
+.cred-row {
+    width: 100%;
+    height: 2;
+    background: #0d1117;
+    pointer: pointer;
+    margin-bottom: 1;
+}
+
+.cred-row.alt {
+    background: #131a24;
+}
+
+.cred-row:hover {
+    background: #1c2534;
+}
+
+.cred-row:focus {
+    background: #33518f;
+}
+
+.cred-row:focus .cred-line {
+    color: #f0f5ff;
+}
+
+.cred-row:focus .cred-detail {
+    color: #bccdf0;
+    text-style: none;
+}
+
+.cred-text {
+    width: 1fr;
+    height: 2;
+    padding: 0 1;
+}
+
+.cred-line {
+    width: 100%;
+    height: 1;
+}
+
+.cred-detail {
+    color: #55617a;
+    text-style: dim;
+    padding-left: 2;
+}
+
+.cred-icon {
+    width: 3;
+    height: 2;
+    content-align: center middle;
+    color: #6b7a94;
+}
+
+/* Destructive, so it announces itself on hover rather than lighting up the
+   same neutral blue every other icon uses. */
+.cred-icon:hover {
+    color: #ffdde2;
+    background: #8b2a3a;
+}
+
 Input {
     background: #0d1117;
     border: tall #2a3446;

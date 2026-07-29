@@ -254,6 +254,23 @@ or use `agent` mode and rely on your ssh agent.
 
 Password and key auth are both supported, including key passphrases.
 
+### Managing them
+
+`/vault` (or `Ctrl+K`) lists every credential with the number of hosts using it.
+Select one to edit, **New** to add one, or the `✕` at the row's right edge to
+delete it.
+
+- **Deleting is refused while a host still points at the credential.** The
+  dialog names the hosts and offers to edit it instead - deleting would leave
+  them unable to connect, and the breakage would not surface until you tried.
+  An unused credential deletes after a confirmation.
+- **Renaming repoints every host automatically**, and the status line says how
+  many moved. `hosts.json` stores the credential's name rather than an id, so a
+  rename without this would silently dangle each host that shared it.
+- **Names must be unique**, case-insensitively, because the vault looks them up
+  that way. Saving a name that is already taken is flagged on the form rather
+  than quietly replacing the other credential's secret.
+
 ### Choosing authentication for a host
 
 The **Authentication** dropdown on the add/edit host form offers, in order:

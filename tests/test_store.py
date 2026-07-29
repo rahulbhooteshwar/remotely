@@ -140,3 +140,28 @@ def test_save_is_atomic_and_leaves_no_temp_files(store: HostStore) -> None:
     store.add(make_host())
     leftovers = [p.name for p in config.home().iterdir() if p.name.endswith(".tmp")]
     assert leftovers == []
+
+
+def test_rebind_credential_moves_every_host_that_used_it(store: HostStore) -> None:
+    store.add(make_host("a", auth_mode="credential", credential="ldap"))
+    store.add(make_host("b", auth_mode="credential", credential="LDAP"))
+    store.add(make_host("c", auth_mode="credential", credential="other"))
+    store.add(make_host("d", auth_mode="agent"))
+
+    moved = store.rebind_credential("ldap", "corp-ldap")
+
+    assert moved == 2, "case-insensitive match, like the vault's own lookup"
+    assert store.get("a").credential == "corp-ldap"
+    assert store.get("b").credential == "corp-ldap"
+    assert store.get("c").credential == "other", "an unrelated credential moved"
+    assert store.get("d").credential is None
+
+    reloaded = HostStore()
+    reloaded.load()
+    assert reloaded.get("a").credential == "corp-ldap", "the change was not persisted"
+
+
+def test_rebind_credential_is_a_no_op_when_nothing_uses_it(store: HostStore) -> None:
+    store.add(make_host("a", auth_mode="credential", credential="ldap"))
+    assert store.rebind_credential("unused", "renamed") == 0
+    assert store.get("a").credential == "ldap"

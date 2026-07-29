@@ -223,6 +223,36 @@ the list come first. It used to be a leading "Close", which in a dialog full of
 closable things read as "close the highlighted tab" while actually closing only
 the dialog.
 
+### The vault browser
+
+`CredentialListScreen` is **not** a `ListPickerScreen` — an OptionList row is
+drawn text, so it has nowhere to put a per-row delete control. It builds
+`CredentialRow` widgets instead, the same reasoning as the launcher tiles in
+`results.py`: the delete glyph is its own widget, so Textual does the layout and
+the clickable cells cannot drift away from the drawn ones.
+`CredentialDeleteIcon._on_click` **must** call `event.stop()` — the row beneath
+opens the editor, so without it one click would both delete and edit. It returns
+the same `PickerResult` shape as the picker, with `action="delete"`.
+
+Rows are focusable and the screen binds up/down, because replacing the
+OptionList would otherwise have quietly dropped keyboard navigation. Enter and
+delete are handled on the row rather than the screen, so the dialog's buttons
+keep their own Enter behaviour.
+
+Three invariants live in `app.py`:
+
+- **Delete is refused while `store.using_credential()` is non-empty.** Cascading
+  would leave hosts pointing at a name that no longer exists, and that only
+  surfaces at connect time. The refusal offers "Edit instead".
+- **A rename calls `store.rebind_credential()`, and only after the vault write
+  succeeds.** `hosts.json` holds the credential's name, not a stable id. Moving
+  hosts first would point them at a name the vault might not end up having.
+- **`CredentialFormScreen` checks the name against `existing_names` itself.**
+  `Vault.put` is a blind upsert keyed on the lowercased name, so saving onto an
+  existing one silently replaces another credential's secret — and every host
+  sharing it. The form flags the clash instead; pass `existing_names` whenever
+  you construct it.
+
 ### Disconnect overlay and retry
 
 A dead session (`error` or `closed`) draws a centred panel over the pane —

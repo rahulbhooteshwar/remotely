@@ -9,6 +9,7 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import (
@@ -615,9 +616,32 @@ class CredentialFormScreen(CompactOnSmall, ModalScreen[Credential | None]):
         Binding("ctrl+s", "save", "Save"),
     ]
 
-    def __init__(self, credential: Credential | None = None) -> None:
+    def __init__(
+        self,
+        credential: Credential | None = None,
+        *,
+        existing_names: Sequence[str] = (),
+    ) -> None:
         super().__init__()
         self.original = credential
+        self.existing_names = list(existing_names)
+
+    def _name_conflict(self, name: str) -> str:
+        """Complaint about ``name`` already being taken, or "" if it is free.
+
+        Checked here rather than left to the vault because `Vault.put` is a
+        blind upsert: saving over an existing name would silently replace
+        someone else's secret and re-point every host that shares it.
+        """
+        taken = {n.strip().lower() for n in self.existing_names}
+        original = self.original.name.strip().lower() if self.original else ""
+        key = name.strip().lower()
+        if key == original or key not in taken:
+            return ""
+        return (
+            f"A credential named '{name.strip()}' already exists. Choose a "
+            "different name, or delete the existing one first."
+        )
 
     def compose(self) -> ComposeResult:
         cred = self.original
@@ -688,6 +712,9 @@ class CredentialFormScreen(CompactOnSmall, ModalScreen[Credential | None]):
             description=value_of("description").strip(),
         )
         problems = credential.validate()
+        conflict = self._name_conflict(credential.name)
+        if conflict:
+            problems.append(conflict)
         if problems:
             self.query_one("#cred-error", Static).update(" ".join(problems))
             return
@@ -916,21 +943,155 @@ def theme_options(themes: Sequence[Theme]) -> list[Option]:
     return rows
 
 
-def credential_options(credentials: Sequence[Credential], usage: dict[str, int]) -> list[Option]:
-    """Build picker rows for the vault browser."""
-    rows: list[Option] = []
-    for cred in credentials:
-        count = usage.get(cred.name.lower(), 0)
-        used = f"{count} host{'s' if count != 1 else ''}"
+class CredentialRow(Horizontal):
+    """One vault credential, with its own delete control.
+
+    Built from widgets rather than an OptionList row for the same reason the
+    launcher tiles are: an OptionList row is drawn text, so it has nowhere to
+    put a button. Here the delete glyph is a widget, and Textual does the
+    layout - the clickable cells cannot drift away from the drawn ones.
+    """
+
+    can_focus = True
+
+    class Chosen(Message):
+        def __init__(self, name: str) -> None:
+            super().__init__()
+            self.name = name
+
+    class DeleteRequested(Message):
+        def __init__(self, name: str) -> None:
+            super().__init__()
+            self.name = name
+
+    def __init__(
+        self, credential: Credential, used_by: int, *, alternate: bool = False
+    ) -> None:
+        super().__init__(classes="cred-row" + (" alt" if alternate else ""))
+        self.credential = credential
+        self.used_by = used_by
+
+    def compose(self) -> ComposeResult:
+        cred = self.credential
         detail = cred.key_path if cred.kind == "key" else (cred.username or "")
-        rows.append(
-            Option(
-                f"[b]{cred.name}[/b]  [dim]{cred.kind}[/dim]\n"
-                f"    [dim]{detail}{'  ' if detail else ''}{used}[/dim]",
-                id=cred.name,
-            )
+        used = (
+            f"used by {self.used_by} host{'s' if self.used_by != 1 else ''}"
+            if self.used_by
+            else "unused"
         )
-    return rows
+        with Vertical(classes="cred-text"):
+            yield Static(
+                f"[b]{cred.name}[/b]  [dim]{cred.kind}[/dim]", classes="cred-line"
+            )
+            yield Static(
+                f"{detail}{'  ' if detail else ''}{used}",
+                classes="cred-line cred-detail",
+            )
+        yield CredentialDeleteIcon(cred.name)
+
+    def _on_click(self, event) -> None:
+        # The delete icon stops its own clicks, so anything here is the row.
+        event.stop()
+        self.focus()
+        self.post_message(self.Chosen(self.credential.name))
+
+    def _on_key(self, event) -> None:
+        # Handled on the row, not the screen, so the buttons keep their own
+        # enter behaviour instead of fighting a screen-wide binding.
+        if event.key == "enter":
+            event.stop()
+            self.post_message(self.Chosen(self.credential.name))
+        elif event.key in ("delete", "backspace"):
+            event.stop()
+            self.post_message(self.DeleteRequested(self.credential.name))
+
+
+class CredentialDeleteIcon(Static):
+    """The delete control at a credential row's right edge."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__("✕", classes="cred-icon")
+        self.credential_name = name
+        self.tooltip = "Delete credential"
+
+    def _on_click(self, event) -> None:
+        # Stop it here or the row beneath opens the edit form as well - the
+        # click would both delete and edit, which is nobody's intent.
+        event.stop()
+        event.prevent_default()
+        self.post_message(CredentialRow.DeleteRequested(self.credential_name))
+
+
+class CredentialListScreen(CompactOnSmall, ModalScreen[PickerResult | None]):
+    """The vault browser: pick one to edit, or delete it in place."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_none", "Close"),
+        Binding("up", "move(-1)", "Up", show=False),
+        Binding("down", "move(1)", "Down", show=False),
+    ]
+
+    def __init__(
+        self, credentials: Sequence[Credential], usage: dict[str, int]
+    ) -> None:
+        super().__init__()
+        self.credentials = list(credentials)
+        self.usage = usage
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal modal-wide"):
+            yield Label("Credentials", classes="modal-title")
+            yield Static(
+                "One credential can be shared by many hosts. Select to edit, "
+                "or use ✕ to delete an unused one.",
+                classes="modal-help",
+            )
+            with VerticalScroll(classes="form-scroll"):
+                if not self.credentials:
+                    yield Static("No credentials yet.", classes="modal-help empty")
+                for index, cred in enumerate(self.credentials):
+                    yield CredentialRow(
+                        cred,
+                        self.usage.get(cred.name.lower(), 0),
+                        alternate=bool(index % 2),
+                    )
+            with Horizontal(classes="modal-buttons"):
+                yield _button("New", id="new")
+                yield _button("Lock vault", id="lock")
+                yield _button("Ok", id="cancel")
+
+    def on_mount(self) -> None:
+        rows = list(self.query(CredentialRow))
+        if rows:
+            rows[0].focus()
+
+    def action_move(self, delta: int) -> None:
+        rows = list(self.query(CredentialRow))
+        if not rows:
+            return
+        try:
+            index = rows.index(self.focused)  # type: ignore[arg-type]
+        except ValueError:  # focus is on a button, or nowhere
+            index = -1 if delta > 0 else 0
+        rows[(index + delta) % len(rows)].focus()
+
+    @on(CredentialRow.Chosen)
+    def _chosen(self, event: CredentialRow.Chosen) -> None:
+        self.dismiss(PickerResult(selection=event.name))
+
+    @on(CredentialRow.DeleteRequested)
+    def _delete(self, event: CredentialRow.DeleteRequested) -> None:
+        self.dismiss(PickerResult(action="delete", selection=event.name))
+
+    @on(Button.Pressed)
+    def _pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id:
+            self.dismiss(PickerResult(action=event.button.id))
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
 
 
 def session_options(sessions: Sequence["Session"]) -> list[Option]:

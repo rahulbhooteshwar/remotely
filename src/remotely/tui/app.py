@@ -41,6 +41,7 @@ from ..vault import (
 from .screens import (
     ConfirmScreen,
     CredentialFormScreen,
+    CredentialListScreen,
     HelpScreen,
     HostDetailScreen,
     HostFormResult,
@@ -48,7 +49,6 @@ from .screens import (
     ListPickerScreen,
     PasscodeScreen,
     TextPromptScreen,
-    credential_options,
     session_options,
     theme_options,
 )
@@ -1372,16 +1372,7 @@ class RemotelyApp(App[None]):
                 for cred in credentials
             }
             choice = await self.push_screen_wait(
-                ListPickerScreen(
-                    "Credentials",
-                    credential_options(credentials, usage),
-                    help_text=(
-                        "One credential can be shared by many hosts. "
-                        "Select to edit, or add a new one."
-                    ),
-                    empty_text="No credentials yet.",
-                    extra_buttons=[("new", "New"), ("lock", "Lock vault")],
-                )
+                CredentialListScreen(credentials, usage)
             )
             if choice is None:
                 return
@@ -1389,7 +1380,9 @@ class RemotelyApp(App[None]):
                 self._lock_vault()
                 return
             if choice.action == "new":
-                created = await self.push_screen_wait(CredentialFormScreen())
+                created = await self.push_screen_wait(
+                    CredentialFormScreen(existing_names=self.vault.names())
+                )
                 if created is not None:
                     try:
                         self.vault.put(created)
@@ -1399,20 +1392,82 @@ class RemotelyApp(App[None]):
                 continue
             if choice.selection is None:
                 continue
+            if choice.action == "delete":
+                if not await self._delete_credential(choice.selection):
+                    continue
+                continue
+            await self._edit_credential(choice.selection)
 
-            existing = self.vault.get(choice.selection)
-            if existing is None:
-                continue
-            edited = await self.push_screen_wait(CredentialFormScreen(existing))
-            if edited is None:
-                continue
-            try:
-                if edited.name.lower() != existing.name.lower():
-                    self.vault.delete(existing.name)
-                self.vault.put(edited)
-                self._status(f"Saved credential [b]{edited.name}[/b].")
-            except VaultError as exc:
-                self._status(str(exc), error=True)
+    async def _delete_credential(self, name: str) -> bool:
+        """Delete a credential, refusing while any host still points at it.
+
+        Refusing rather than cascading is deliberate: the hosts would otherwise
+        be left referring to a name that no longer exists, and that only
+        surfaces later, at connect time.
+        """
+        users = self.store.using_credential(name)
+        if users:
+            listed = ", ".join(h.name for h in users[:4])
+            if len(users) > 4:
+                listed += f", and {len(users) - 4} more"
+            edit = await self.push_screen_wait(
+                ConfirmScreen(
+                    f"'{name}' is used by {len(users)} "
+                    f"host{'s' if len(users) != 1 else ''}",
+                    detail=f"{listed}. Deleting it would leave "
+                    f"{'them' if len(users) != 1 else 'it'} unable to connect. "
+                    "Edit it instead - every host follows the change - or point "
+                    "those hosts elsewhere first.",
+                    confirm_label="Edit instead",
+                )
+            )
+            if edit:
+                await self._edit_credential(name)
+            return False
+
+        confirmed = await self.push_screen_wait(
+            ConfirmScreen(
+                f"Delete credential '{name}'?",
+                detail="No host uses it. The stored secret is gone for good.",
+                confirm_label="Delete",
+            )
+        )
+        if not confirmed:
+            return False
+        try:
+            self.vault.delete(name)
+        except VaultError as exc:
+            self._status(str(exc), error=True)
+            return False
+        self._status(f"Deleted credential [b]{name}[/b].")
+        return True
+
+    async def _edit_credential(self, name: str) -> None:
+        existing = self.vault.get(name)
+        if existing is None:
+            return
+        edited = await self.push_screen_wait(
+            CredentialFormScreen(existing, existing_names=self.vault.names())
+        )
+        if edited is None:
+            return
+        renamed = edited.name.lower() != existing.name.lower()
+        try:
+            if renamed:
+                self.vault.delete(existing.name)
+            self.vault.put(edited)
+        except VaultError as exc:
+            self._status(str(exc), error=True)
+            return
+        note = ""
+        if renamed:
+            # Only after the vault write succeeded: hosts must never be moved
+            # onto a name the vault does not actually have.
+            moved = self.store.rebind_credential(existing.name, edited.name)
+            if moved:
+                note = f" Repointed {moved} host{'s' if moved != 1 else ''}."
+                self._refresh_results()
+        self._status(f"Saved credential [b]{edited.name}[/b].{note}")
 
     @work
     async def action_sessions(self) -> None:

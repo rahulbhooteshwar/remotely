@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -157,6 +158,25 @@ class HostStore:
                 self.save()
                 return removed
         raise StoreError(f"No host named {name!r}.")
+
+    def rebind_credential(self, old: str, new: str) -> int:
+        """Point every host using credential ``old`` at ``new``.
+
+        Returns how many hosts moved. Renaming a credential in the vault would
+        otherwise leave each host referring to a name that no longer exists -
+        hosts.json holds the name, not a stable id - and the breakage only
+        shows up later, at connect time.
+        """
+        key = old.strip().lower()
+        new = new.strip()
+        moved = 0
+        for index, host in enumerate(self._hosts):
+            if (host.credential or "").lower() == key:
+                self._hosts[index] = replace(host, credential=new)
+                moved += 1
+        if moved:
+            self.save()
+        return moved
 
     def replace_all(self, hosts: Iterable[Host]) -> None:
         self._hosts = list(hosts)
