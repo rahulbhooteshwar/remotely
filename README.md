@@ -116,8 +116,6 @@ remotely
 Everything else happens in the command bar:
 
 ```
-/vault                 -> create the vault, set the one passcode
-                          add a credential named "ldap" with your password
 ctrl+n                 -> new host form
                           name      prod-web-01
                           hostname  10.0.0.1
@@ -125,10 +123,16 @@ ctrl+n                 -> new host form
                           group     Production
                           tags      web, critical
                           theme     prod
-                          auth      credential: ldap
+                          auth      password based (saved in vault)
+                          password  ••••••••
 prod                   -> fuzzy search finds it
 enter                  -> connects
 ```
+
+The password goes straight into the vault as a credential named
+`cred-prod-web-01`, and the host is bound to it. You are asked for the vault
+passcode on the way - once, the first time. If you would rather name the
+credential yourself so other hosts can share it, fill in **Save credential as**.
 
 What happens on that last keystroke:
 
@@ -244,6 +248,36 @@ hosts at it, rotate it once. A host can equally have its own private credential,
 or use `agent` mode and rely on your ssh agent.
 
 Password and key auth are both supported, including key passphrases.
+
+### Choosing authentication for a host
+
+The **Authentication** dropdown on the add/edit host form offers, in order:
+
+| Choice | What it does |
+| --- | --- |
+| `password based (saved in vault)` | Type a password here; it is stored as a new vault credential and the host is bound to it |
+| `ssh key based (saved in vault)` | Same, for a key path and optional passphrase |
+| `credential: <name>` | Reuse a credential already in the vault |
+| `ssh agent / default keys` | Store nothing - authenticate with your running ssh agent (`SSH_AUTH_SOCK`) and the default `~/.ssh/id_*` keys |
+
+The first two are shortcuts for "I do not want to visit `/vault` first". Saving
+prompts for the vault passcode if the vault is locked, and if you cancel that
+prompt neither the credential nor the host is written - so a host can never end
+up pointing at a credential that does not exist.
+
+The optional **Save credential as** field names the new entry so other hosts can
+share it. Leave it blank and the name is derived from the host: `cred-prod-web`,
+then `cred-prod-web-1`, `cred-prod-web-2` if that is taken. Naming an entry that
+already exists is refused rather than overwritten.
+
+Editing a host works the same way: the dropdown opens on whatever credential the
+host uses now, and picking one of the first two options rotates it onto a brand
+new vault entry, leaving the old one alone.
+
+`ssh agent / default keys` is the only option that depends on machine-level
+setup rather than anything Remotely stores. Note that the built-in client does
+not read `~/.ssh/config` - if you rely on `IdentityFile`, `ProxyJump` or host
+aliases from there, turn on **use system ssh** for that host.
 
 ### Host keys
 

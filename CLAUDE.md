@@ -42,7 +42,9 @@ Layered, TUI at the top, no upward dependencies:
   case-insensitively.
 - **`vault.py`** — one encrypted file, one passcode. scrypt → AES-256-GCM, with
   the envelope header authenticated as AAD so weakening the KDF params on disk
-  fails the tag check rather than downgrading security.
+  fails the tag check rather than downgrading security. Also owns
+  `default_credential_name`/`unique_credential_name`, the naming rules for
+  credentials the host form creates on the user's behalf.
 - **`themes.py`** — TOML themes from the bundled package plus
   `~/.remotely/themes/`, user files shadowing bundled ones by name.
 - **`transport.py`** — `ParamikoTransport` (default, in-process) and
@@ -299,6 +301,33 @@ file, no temp file and no sshpass.
 This is why `SystemSSHTransport` refuses a stored password rather than trying to
 smuggle it across a process boundary — reintroducing that path would undo the
 main security gain of the rewrite.
+
+### Creating a credential from the host form
+
+The Authentication dropdown lists, in this order: `password based`, `ssh key
+based`, every saved credential, then `ssh agent / default keys`. The first two
+are the sentinels `NEW_PASSWORD_CHOICE`/`NEW_KEY_CHOICE`, and picking one
+reveals its fields (`display` is toggled on containers that stay mounted —
+`mount()` is async, so building them on demand would race a save in the same
+tick).
+
+The split of responsibility is deliberate and load-bearing:
+
+- `HostFormScreen` **cannot** write to the vault. It returns a `HostFormResult`
+  carrying the host plus a *draft* `Credential` whose `name` may be blank.
+- `RemotelyApp._apply_form_result` unlocks the vault (prompting if needed),
+  resolves the final name, calls `vault.put`, and only then rebinds the host
+  with `auth_mode="credential"`.
+
+`_collect()` therefore returns the host as `auth_mode="agent"` for these two
+choices. That is not a bug: if the unlock prompt is cancelled or the name
+collides, nothing is written at all, so a host can never reference a credential
+the vault does not have. Any change here must preserve that all-or-nothing
+property.
+
+An explicitly typed name that already exists is **refused**, never overwritten —
+silently replacing a shared credential like `ldap` would change auth for every
+host pointing at it. Blank names auto-resolve via `unique_credential_name`.
 
 ### Keys the terminal must not swallow
 

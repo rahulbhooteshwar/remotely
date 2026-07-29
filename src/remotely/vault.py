@@ -21,7 +21,7 @@ import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -54,6 +54,35 @@ class VaultLocked(VaultError):
 
 class InvalidPasscode(VaultError):
     """Raised when decryption fails the authentication tag check."""
+
+
+#: Prefix for credentials the host form creates on the user's behalf. Keeping
+#: them under one prefix means they sort together in the vault browser, so the
+#: auto-named entries never bury a hand-named one like "ldap".
+AUTO_NAME_PREFIX = "cred"
+
+
+def default_credential_name(host_name: str) -> str:
+    """The name an auto-created credential gets when the user skips the field."""
+    stem = " ".join(host_name.split()).strip()
+    return f"{AUTO_NAME_PREFIX}-{stem}" if stem else AUTO_NAME_PREFIX
+
+
+def unique_credential_name(base: str, existing: Iterable[str]) -> str:
+    """``base``, or ``base-1``/``base-2``/... if that name is already taken.
+
+    Vault names are matched case-insensitively (see :meth:`Vault.get`), so the
+    collision check has to be too - otherwise "Cred-web" would happily be
+    stored on top of "cred-web".
+    """
+    taken = {name.strip().lower() for name in existing}
+    base = base.strip() or AUTO_NAME_PREFIX
+    if base.lower() not in taken:
+        return base
+    suffix = 1
+    while f"{base}-{suffix}".lower() in taken:
+        suffix += 1
+    return f"{base}-{suffix}"
 
 
 def _b64e(raw: bytes) -> str:

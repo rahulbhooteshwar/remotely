@@ -7,6 +7,7 @@ so there is a way back from any session.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -29,12 +30,20 @@ from ..sessions import Session, SessionManager
 from ..store import HostStore, StoreError
 from ..themes import Theme, ThemeRegistry
 from ..transport import TransportError, system_ssh_available
-from ..vault import InvalidPasscode, Vault, VaultError, VaultLocked
+from ..vault import (
+    InvalidPasscode,
+    Vault,
+    VaultError,
+    VaultLocked,
+    default_credential_name,
+    unique_credential_name,
+)
 from .screens import (
     ConfirmScreen,
     CredentialFormScreen,
     HelpScreen,
     HostDetailScreen,
+    HostFormResult,
     HostFormScreen,
     ListPickerScreen,
     PasscodeScreen,
@@ -1158,9 +1167,53 @@ class RemotelyApp(App[None]):
         self._refresh_results()
         self._status("Reloaded configuration from disk.")
 
+    async def _apply_form_result(self, result: HostFormResult) -> Host | None:
+        """Store the form's new credential, if any, and bind the host to it.
+
+        Returns the host to save, or ``None`` when the credential could not be
+        stored - in which case nothing at all is written, so the host never ends
+        up referring to a credential the vault does not have.
+        """
+        draft = result.credential
+        if draft is None:
+            return result.host
+        if not await self._ensure_vault("Unlock the vault to save this credential."):
+            self._status("Cancelled: vault stayed locked.", error=True)
+            return None
+        if draft.name:
+            if self.vault.get(draft.name) is not None:
+                self._status(
+                    f"A credential named [b]{draft.name}[/b] already exists. "
+                    "Pick another name, or select it from the list.",
+                    error=True,
+                )
+                return None
+            name = draft.name
+        else:
+            name = unique_credential_name(
+                default_credential_name(result.host.name), self.vault.names()
+            )
+        try:
+            self.vault.put(replace(draft, name=name))
+        except VaultError as exc:
+            self._status(str(exc), error=True)
+            return None
+        return replace(result.host, auth_mode="credential", credential=name)
+
+    @staticmethod
+    def _credential_note(result: HostFormResult, saved: Host) -> str:
+        """Trailer naming the credential a save just created, if it created one.
+
+        Said as part of the host's own status line rather than on its own: the
+        add/update message lands straight after and would wipe it.
+        """
+        if result.credential is None or not saved.credential:
+            return ""
+        return f" Credential [b]{saved.credential}[/b] saved to the vault."
+
     @work
     async def action_new_host(self) -> None:
-        host = await self.push_screen_wait(
+        result = await self.push_screen_wait(
             HostFormScreen(
                 themes=self.themes.names(),
                 credentials=[] if self.vault.is_locked else self.vault.names(),
@@ -1168,6 +1221,9 @@ class RemotelyApp(App[None]):
                 vault_locked=self.vault.is_locked,
             )
         )
+        if result is None:
+            return
+        host = await self._apply_form_result(result)
         if host is None:
             return
         try:
@@ -1177,7 +1233,7 @@ class RemotelyApp(App[None]):
             return
         self._refresh_banner()
         self._refresh_results()
-        self._status(f"Added [b]{host.name}[/b].")
+        self._status(f"Added [b]{host.name}[/b].{self._credential_note(result, host)}")
 
     @work
     async def action_edit_host(self) -> None:
@@ -1196,7 +1252,7 @@ class RemotelyApp(App[None]):
         if host is None:
             self._status("Select a host to edit first.", error=True)
             return
-        updated = await self.push_screen_wait(
+        result = await self.push_screen_wait(
             HostFormScreen(
                 host,
                 themes=self.themes.names(),
@@ -1205,6 +1261,9 @@ class RemotelyApp(App[None]):
                 vault_locked=self.vault.is_locked,
             )
         )
+        if result is None:
+            return
+        updated = await self._apply_form_result(result)
         if updated is None:
             return
         try:
@@ -1214,7 +1273,9 @@ class RemotelyApp(App[None]):
             return
         self._refresh_banner()
         self._refresh_results()
-        self._status(f"Updated [b]{updated.name}[/b].")
+        self._status(
+            f"Updated [b]{updated.name}[/b].{self._credential_note(result, updated)}"
+        )
 
     @work
     async def action_delete_host(self) -> None:

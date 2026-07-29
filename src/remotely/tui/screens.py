@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Iterable, Sequence
 
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -27,6 +29,25 @@ if TYPE_CHECKING:  # avoids a cycle: sessions imports themes, screens imports bo
     from ..sessions import Session
 
 AGENT_CHOICE = "__agent__"
+#: Sentinels for "make me a new vault credential from the fields below". They
+#: cannot collide with a real credential name because the vault rejects an
+#: empty name and these are not valid ones a user would type.
+NEW_PASSWORD_CHOICE = "__new_password__"
+NEW_KEY_CHOICE = "__new_key__"
+NEW_CHOICES = (NEW_PASSWORD_CHOICE, NEW_KEY_CHOICE)
+
+
+@dataclass(slots=True)
+class HostFormResult:
+    """What :class:`HostFormScreen` hands back.
+
+    The form cannot write to the vault itself - that may need an unlock prompt,
+    which only the app can push - so a request to create a credential comes back
+    as a draft. ``credential.name`` may be blank, meaning "you pick one".
+    """
+
+    host: Host
+    credential: Credential | None = None
 
 
 def _field(label: str, widget) -> Vertical:
@@ -217,7 +238,7 @@ class TextPromptScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-class HostFormScreen(CompactOnSmall, ModalScreen[Host | None]):
+class HostFormScreen(CompactOnSmall, ModalScreen[HostFormResult | None]):
     """Add or edit a host."""
 
     BINDINGS = [
@@ -284,7 +305,13 @@ class HostFormScreen(CompactOnSmall, ModalScreen[Host | None]):
                     "Tags (comma separated)",
                     Input(value=", ".join(host.tags) if host else "", id="tags"),
                 )
-                auth_options: list[tuple[str, str]] = [("ssh agent / default keys", AGENT_CHOICE)]
+                # Order matters: the two "create one now" entries lead, because
+                # typing a password here is the common case for a new host, and
+                # agent auth trails because it needs nothing from this form.
+                auth_options: list[tuple[str, str]] = [
+                    ("password based (saved in vault)", NEW_PASSWORD_CHOICE),
+                    ("ssh key based (saved in vault)", NEW_KEY_CHOICE),
+                ]
                 auth_options += [(f"credential: {n}", n) for n in self.credential_names]
                 current_auth = AGENT_CHOICE
                 if host and host.auth_mode == "credential" and host.credential:
@@ -295,13 +322,43 @@ class HostFormScreen(CompactOnSmall, ModalScreen[Host | None]):
                         # visible instead of silently downgrading to agent auth.
                         auth_options.append((f"credential: {host.credential}", host.credential))
                         current_auth = host.credential
+                auth_options.append(("ssh agent / default keys", AGENT_CHOICE))
                 yield _field(
                     "Authentication",
                     Select(auth_options, value=current_auth, allow_blank=False, id="auth"),
                 )
                 if self.vault_locked:
                     yield Static(
-                        "Vault is locked, so existing credentials are not listed.",
+                        "Vault is locked, so existing credentials are not listed. "
+                        "You can still add a new one - saving will ask for the "
+                        "passcode.",
+                        classes="modal-help",
+                    )
+                # Always mounted, shown only for the choice they belong to.
+                # Toggling display beats mounting on demand: mount() is async,
+                # so a form saved in the same tick as the change would read
+                # fields that do not exist yet.
+                with Vertical(id="new-password-fields"):
+                    yield _field("Password", Input(password=True, id="new_password"))
+                with Vertical(id="new-key-fields"):
+                    yield _field(
+                        "Key path",
+                        Input(placeholder="~/.ssh/id_ed25519", id="new_key_path"),
+                    )
+                    yield _field(
+                        "Key passphrase (optional)",
+                        Input(password=True, id="new_key_passphrase"),
+                    )
+                with Vertical(id="new-cred-name-fields"):
+                    yield _field(
+                        "Save credential as (optional)",
+                        Input(
+                            placeholder="reuse it for other hosts under this name",
+                            id="new_cred_name",
+                        ),
+                    )
+                    yield Static(
+                        "Leave this blank and a default name is generated for you.",
                         classes="modal-help",
                     )
                 ssh_options = ""
@@ -336,7 +393,65 @@ class HostFormScreen(CompactOnSmall, ModalScreen[Host | None]):
                 yield Button("Save", variant="primary", id="save")
 
     def on_mount(self) -> None:
+        self._sync_auth_fields()
         self.query_one("#name", Input).focus()
+
+    # ------------------------------------------------------------- new credential
+
+    def _auth_choice(self) -> str:
+        return str(self.query_one("#auth", Select).value)
+
+    def _sync_auth_fields(self) -> None:
+        """Show only the fields the selected authentication needs."""
+        choice = self._auth_choice()
+        self.query_one("#new-password-fields").display = choice == NEW_PASSWORD_CHOICE
+        self.query_one("#new-key-fields").display = choice == NEW_KEY_CHOICE
+        self.query_one("#new-cred-name-fields").display = choice in NEW_CHOICES
+
+    @on(Select.Changed, "#auth")
+    def _auth_changed(self) -> None:
+        self._sync_auth_fields()
+        # The revealed field sits well below the fold on a full-length form, so
+        # picking "password based" would otherwise look like it did nothing.
+        # Focusing scrolls it into view and leaves the cursor ready to type.
+        field = {
+            NEW_PASSWORD_CHOICE: "#new_password",
+            NEW_KEY_CHOICE: "#new_key_path",
+        }.get(self._auth_choice())
+        if field is not None:
+            self.call_after_refresh(self._focus_field, field)
+
+    def _focus_field(self, selector: str) -> None:
+        try:
+            self.query_one(selector, Input).focus()
+        except NoMatches:  # the form closed before the refresh landed
+            pass
+
+    def _draft_credential(self) -> Credential | None:
+        """The vault entry to create, or ``None`` when auth needs no new one.
+
+        The name is left as typed - blank included - because uniquifying it
+        needs the vault's contents, which this screen deliberately has no
+        access to.
+        """
+        choice = self._auth_choice()
+        if choice not in NEW_CHOICES:
+            return None
+
+        def value_of(widget_id: str) -> str:
+            return self.query_one(f"#{widget_id}", Input).value.strip()
+
+        name = value_of("new_cred_name")
+        if choice == NEW_PASSWORD_CHOICE:
+            # Not stripped: a password's leading or trailing space is part of it.
+            password = self.query_one("#new_password", Input).value
+            return Credential(name=name, kind="password", password=password or None)
+        return Credential(
+            name=name,
+            kind="key",
+            key_path=value_of("new_key_path") or None,
+            key_passphrase=value_of("new_key_passphrase") or None,
+        )
 
     def _collect(self) -> Host:
         def value_of(widget_id: str) -> str:
@@ -360,8 +475,12 @@ class HostFormScreen(CompactOnSmall, ModalScreen[Host | None]):
         else:
             ssh_options = None
 
-        auth_value = str(self.query_one("#auth", Select).value)
-        if auth_value == AGENT_CHOICE:
+        auth_value = self._auth_choice()
+        if auth_value == AGENT_CHOICE or auth_value in NEW_CHOICES:
+            # A requested-but-unwritten credential leaves here as agent auth: it
+            # does not exist yet and its final name is the app's to decide, so
+            # the host is rebound only once the vault has taken the secret. That
+            # way a failed unlock cannot leave a host pointing at nothing.
             auth_mode = "agent"
             credential = None
         else:
@@ -385,11 +504,16 @@ class HostFormScreen(CompactOnSmall, ModalScreen[Host | None]):
 
     def action_save(self) -> None:
         host = self._collect()
+        draft = self._draft_credential()
         problems = host.validate()
+        if draft is not None:
+            # A blank name is legal here (the app fills one in), so validate a
+            # stand-in that has one and let the real check be about the secret.
+            problems += replace(draft, name=draft.name or "placeholder").validate()
         if problems:
             self.query_one("#form-error", Static).update(" ".join(problems))
             return
-        self.dismiss(host)
+        self.dismiss(HostFormResult(host=host, credential=draft))
 
     @on(Button.Pressed, "#save")
     def _save(self) -> None:

@@ -1972,3 +1972,377 @@ async def test_paste_translates_newlines_and_honours_bracketing() -> None:
         pane._on_paste(events.Paste("ignored"))
         assert len(sent) == before
         app.sessions.close_all()
+
+
+# ------------------------------------------------- inline credential creation
+
+
+async def _open_host_form(app, pilot, host=None):
+    """Push the host form the way the app does and wait for it to settle."""
+    from remotely.tui.screens import HostFormScreen
+
+    app.push_screen(
+        HostFormScreen(
+            host,
+            themes=app.themes.names(),
+            credentials=[] if app.vault.is_locked else app.vault.names(),
+            groups=app.store.group_names(),
+            vault_locked=app.vault.is_locked,
+        )
+    )
+    for _ in range(12):
+        await pilot.pause()
+    return app.screen
+
+
+def _auth_values(screen) -> list[str]:
+    from textual.widgets import Select
+
+    return [value for _label, value in screen.query_one("#auth", Select)._options]
+
+
+async def test_auth_dropdown_leads_with_new_credentials_and_ends_with_agent() -> None:
+    from remotely.models import Credential
+    from remotely.tui.screens import AGENT_CHOICE, NEW_KEY_CHOICE, NEW_PASSWORD_CHOICE
+    from .conftest import PASSCODE
+
+    app = build_app()
+    app.vault.initialise(PASSCODE)
+    app.vault.put(Credential(name="ldap", kind="password", password="x"))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        screen = await _open_host_form(app, pilot)
+        assert _auth_values(screen) == [
+            NEW_PASSWORD_CHOICE,
+            NEW_KEY_CHOICE,
+            "ldap",
+            AGENT_CHOICE,
+        ]
+        # Creating a host still defaults to the option that needs no input.
+        from textual.widgets import Select
+
+        assert screen.query_one("#auth", Select).value == AGENT_CHOICE
+
+
+async def test_auth_choice_shows_only_the_fields_it_needs() -> None:
+    from remotely.tui.screens import AGENT_CHOICE, NEW_KEY_CHOICE, NEW_PASSWORD_CHOICE
+    from textual.widgets import Select
+
+    app = build_app()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        screen = await _open_host_form(app, pilot)
+
+        def shown() -> dict[str, bool]:
+            return {
+                name: screen.query_one(f"#{name}").display
+                for name in (
+                    "new-password-fields",
+                    "new-key-fields",
+                    "new-cred-name-fields",
+                )
+            }
+
+        assert shown() == {
+            "new-password-fields": False,
+            "new-key-fields": False,
+            "new-cred-name-fields": False,
+        }, "agent auth must not ask for a secret"
+
+        select = screen.query_one("#auth", Select)
+        select.value = NEW_PASSWORD_CHOICE
+        for _ in range(6):
+            await pilot.pause()
+        assert shown() == {
+            "new-password-fields": True,
+            "new-key-fields": False,
+            "new-cred-name-fields": True,
+        }
+
+        select.value = NEW_KEY_CHOICE
+        for _ in range(6):
+            await pilot.pause()
+        assert shown() == {
+            "new-password-fields": False,
+            "new-key-fields": True,
+            "new-cred-name-fields": True,
+        }
+
+        select.value = AGENT_CHOICE
+        for _ in range(6):
+            await pilot.pause()
+        assert not any(shown().values())
+
+
+async def test_new_credential_fields_are_validated_before_save() -> None:
+    from remotely.tui.screens import NEW_KEY_CHOICE, NEW_PASSWORD_CHOICE
+    from textual.widgets import Input, Select, Static
+
+    app = build_app()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        screen = await _open_host_form(app, pilot)
+        screen.query_one("#name", Input).value = "box"
+        screen.query_one("#hostname", Input).value = "10.0.0.9"
+        screen.query_one("#username", Input).value = "root"
+        screen.query_one("#auth", Select).value = NEW_PASSWORD_CHOICE
+        for _ in range(6):
+            await pilot.pause()
+
+        def error_text() -> str:
+            banner = screen.query_one("#form-error", Static)
+            return "".join(seg.text for seg in banner.render_line(0))
+
+        screen.action_save()
+        for _ in range(6):
+            await pilot.pause()
+        assert app.screen is screen, "an empty password must not save"
+        assert "Password is required" in error_text()
+
+        screen.query_one("#auth", Select).value = NEW_KEY_CHOICE
+        for _ in range(6):
+            await pilot.pause()
+        screen.action_save()
+        for _ in range(6):
+            await pilot.pause()
+        assert app.screen is screen, "an empty key path must not save"
+        assert "Key path is required" in error_text()
+
+
+async def test_form_returns_a_draft_credential_it_does_not_name() -> None:
+    """Naming needs the vault's contents, which the form cannot see."""
+    from remotely.tui.screens import NEW_PASSWORD_CHOICE
+    from textual.widgets import Input, Select
+
+    app = build_app()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        screen = await _open_host_form(app, pilot)
+        screen.query_one("#name", Input).value = "box"
+        screen.query_one("#hostname", Input).value = "10.0.0.9"
+        screen.query_one("#username", Input).value = "root"
+        screen.query_one("#auth", Select).value = NEW_PASSWORD_CHOICE
+        for _ in range(6):
+            await pilot.pause()
+        screen.query_one("#new_password", Input).value = " spaced "
+
+        result = screen._collect(), screen._draft_credential()
+        host, draft = result
+        assert draft is not None
+        assert draft.kind == "password"
+        assert draft.password == " spaced ", "surrounding spaces are part of a password"
+        assert draft.name == "", "the app names it, not the form"
+        # Until the vault has the secret the host must not claim to use it.
+        assert host.auth_mode == "agent" and host.credential is None
+
+
+async def _save_host_with_new_credential(
+    app, pilot, *, host_name: str, password: str = "s3cret", cred_name: str = ""
+) -> None:
+    """Drive action_new_host end to end, filling in the new-credential fields."""
+    from remotely.tui.screens import HostFormScreen, NEW_PASSWORD_CHOICE
+    from textual.widgets import Input, Select
+
+    app.action_new_host()
+    for _ in range(20):
+        await pilot.pause()
+    screen = app.screen
+    assert isinstance(screen, HostFormScreen)
+    screen.query_one("#name", Input).value = host_name
+    screen.query_one("#hostname", Input).value = "10.0.0.9"
+    screen.query_one("#username", Input).value = "root"
+    screen.query_one("#auth", Select).value = NEW_PASSWORD_CHOICE
+    for _ in range(6):
+        await pilot.pause()
+    screen.query_one("#new_password", Input).value = password
+    if cred_name:
+        screen.query_one("#new_cred_name", Input).value = cred_name
+    screen.action_save()
+    for _ in range(25):
+        await pilot.pause()
+
+
+async def test_saving_a_host_creates_and_binds_the_credential() -> None:
+    from .conftest import PASSCODE
+
+    app = build_app()
+    app.vault.initialise(PASSCODE)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await _save_host_with_new_credential(app, pilot, host_name="prod-cache")
+
+        assert app.vault.names() == ["cred-prod-cache"]
+        assert app.vault.require("cred-prod-cache").password == "s3cret"
+        saved = app.store.get("prod-cache")
+        assert saved is not None
+        assert saved.auth_mode == "credential"
+        assert saved.credential == "cred-prod-cache"
+
+
+async def test_auto_names_avoid_collisions_between_same_named_attempts() -> None:
+    from remotely.models import Credential
+    from .conftest import PASSCODE
+
+    app = build_app()
+    app.vault.initialise(PASSCODE)
+    app.vault.put(Credential(name="cred-edge", kind="password", password="old"))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await _save_host_with_new_credential(
+            app, pilot, host_name="edge", password="new"
+        )
+
+        assert sorted(app.vault.names()) == ["cred-edge", "cred-edge-1"]
+        assert app.vault.require("cred-edge").password == "old", "must not overwrite"
+        assert app.store.get("edge").credential == "cred-edge-1"
+
+
+async def test_an_explicit_name_is_kept_and_never_silently_overwrites() -> None:
+    from remotely.models import Credential
+    from .conftest import PASSCODE
+
+    app = build_app()
+    app.vault.initialise(PASSCODE)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await _save_host_with_new_credential(
+            app, pilot, host_name="api-1", cred_name="team-login"
+        )
+        assert app.vault.names() == ["team-login"]
+        assert app.store.get("api-1").credential == "team-login"
+
+        # A second host asking for the same name is refused, not merged.
+        await _save_host_with_new_credential(
+            app, pilot, host_name="api-2", password="different", cred_name="team-login"
+        )
+        assert app.vault.require("team-login").password == "s3cret"
+        assert app.store.get("api-2") is None, "the host must not be saved either"
+
+
+async def test_saving_a_new_credential_unlocks_the_vault_first() -> None:
+    """The vault can be locked when the form opens; the save has to ask."""
+    from remotely.tui.screens import PasscodeScreen
+    from textual.widgets import Input
+    from .conftest import PASSCODE
+
+    app = build_app()
+    app.vault.initialise(PASSCODE)
+    app.vault.lock()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        assert app.vault.is_locked
+        await _save_host_with_new_credential(app, pilot, host_name="locked-box")
+
+        assert isinstance(app.screen, PasscodeScreen), "should have asked to unlock"
+        app.screen.query_one("#passcode", Input).value = PASSCODE
+        app.screen._submit()
+        for _ in range(25):
+            await pilot.pause()
+
+        assert not app.vault.is_locked
+        assert app.vault.require("cred-locked-box").password == "s3cret"
+        assert app.store.get("locked-box").credential == "cred-locked-box"
+
+
+async def test_a_refused_unlock_saves_neither_credential_nor_host() -> None:
+    from remotely.tui.screens import PasscodeScreen
+    from .conftest import PASSCODE
+
+    app = build_app()
+    app.vault.initialise(PASSCODE)
+    app.vault.lock()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await _save_host_with_new_credential(app, pilot, host_name="ghost")
+
+        assert isinstance(app.screen, PasscodeScreen)
+        app.screen.dismiss(None)
+        for _ in range(25):
+            await pilot.pause()
+
+        assert app.store.get("ghost") is None
+        assert app.vault.is_locked
+
+
+async def test_editing_can_swap_a_host_onto_a_brand_new_credential() -> None:
+    from remotely.models import Credential
+    from remotely.tui.screens import HostFormScreen, NEW_PASSWORD_CHOICE
+    from textual.widgets import Input, Select
+    from .conftest import PASSCODE
+
+    app = build_app()
+    app.vault.initialise(PASSCODE)
+    app.vault.put(Credential(name="ldap", kind="password", password="old"))
+    app.store.update(
+        "prod-web",
+        make_host("prod-web", group="Production", theme="prod",
+                  auth_mode="credential", credential="ldap"),
+    )
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        app._edit_host("prod-web")
+        for _ in range(20):
+            await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, HostFormScreen)
+
+        select = screen.query_one("#auth", Select)
+        assert select.value == "ldap", "the edit form opens on the current credential"
+        assert NEW_PASSWORD_CHOICE in _auth_values(screen)
+
+        select.value = NEW_PASSWORD_CHOICE
+        for _ in range(6):
+            await pilot.pause()
+        screen.query_one("#new_password", Input).value = "rotated"
+        screen.action_save()
+        for _ in range(25):
+            await pilot.pause()
+
+        assert app.store.get("prod-web").credential == "cred-prod-web"
+        assert app.vault.require("cred-prod-web").password == "rotated"
+        assert app.vault.require("ldap").password == "old", "the old one stays put"
+
+
+async def test_choosing_a_new_credential_reveals_and_focuses_its_field() -> None:
+    """The field appears below the fold, so it must be scrolled to and focused."""
+    from remotely.tui.screens import NEW_KEY_CHOICE, NEW_PASSWORD_CHOICE
+    from textual.widgets import Select
+
+    app = build_app()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        screen = await _open_host_form(app, pilot)
+        select = screen.query_one("#auth", Select)
+        scroll = screen.query_one(".form-scroll")
+
+        for choice, field_id in (
+            (NEW_PASSWORD_CHOICE, "new_password"),
+            (NEW_KEY_CHOICE, "new_key_path"),
+        ):
+            select.value = choice
+            for _ in range(15):
+                await pilot.pause()
+            assert app.focused is not None and app.focused.id == field_id, (
+                f"{choice} should focus #{field_id}, got {app.focused}"
+            )
+            field = screen.query_one(f"#{field_id}")
+            assert scroll.region.contains_region(field.region), (
+                f"#{field_id} is not on screen after being revealed"
+            )
+
+
+async def test_the_status_line_names_the_credential_it_created() -> None:
+    """The add/update message lands last, so the credential has to ride with it."""
+    from textual.widgets import Static
+
+    from .conftest import PASSCODE
+
+    app = build_app()
+    app.vault.initialise(PASSCODE)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await _save_host_with_new_credential(app, pilot, host_name="metrics")
+
+        banner = app.query_one("#status", Static)
+        text = "".join(seg.text for seg in banner.render_line(0))
+        assert "metrics" in text and "cred-metrics" in text, text

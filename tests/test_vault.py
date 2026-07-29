@@ -8,7 +8,14 @@ import pytest
 
 from remotely import config
 from remotely.models import Credential
-from remotely.vault import InvalidPasscode, Vault, VaultError, VaultLocked
+from remotely.vault import (
+    InvalidPasscode,
+    Vault,
+    VaultError,
+    VaultLocked,
+    default_credential_name,
+    unique_credential_name,
+)
 
 from .conftest import PASSCODE, make_credential
 
@@ -144,3 +151,39 @@ def test_redacted_omits_secrets() -> None:
     assert redacted["has_password"] is True
     assert "password" not in redacted
     assert redacted["username"] == "svc"
+
+
+# --------------------------------------------------------------- auto naming
+
+
+def test_default_credential_name_is_derived_from_the_host() -> None:
+    assert default_credential_name("prod-web") == "cred-prod-web"
+    # Internal whitespace collapses; a nameless host still gets a usable name.
+    assert default_credential_name("  my   box  ") == "cred-my box"
+    assert default_credential_name("") == "cred"
+
+
+def test_unique_credential_name_counts_up_past_collisions() -> None:
+    assert unique_credential_name("cred-web", []) == "cred-web"
+    assert unique_credential_name("cred-web", ["cred-web"]) == "cred-web-1"
+    assert (
+        unique_credential_name("cred-web", ["cred-web", "cred-web-1", "cred-web-2"])
+        == "cred-web-3"
+    )
+    # Unrelated names never push the counter along.
+    assert unique_credential_name("cred-web", ["ldap", "cred-db"]) == "cred-web"
+
+
+def test_unique_credential_name_matches_the_vault_case_insensitively() -> None:
+    """Vault.get() lowercases, so a case-only difference would overwrite."""
+    assert unique_credential_name("Cred-Web", ["cred-web"]) == "Cred-Web-1"
+
+
+def test_auto_named_credential_round_trips_through_the_vault(vault: Vault) -> None:
+    name = unique_credential_name(default_credential_name("prod-web"), vault.names())
+    vault.put(Credential(name=name, kind="password", password="s3cret"))
+    second = unique_credential_name(default_credential_name("prod-web"), vault.names())
+    assert (name, second) == ("cred-prod-web", "cred-prod-web-1")
+    vault.put(Credential(name=second, kind="password", password="other"))
+    assert vault.require("cred-prod-web").password == "s3cret"
+    assert vault.require("cred-prod-web-1").password == "other"

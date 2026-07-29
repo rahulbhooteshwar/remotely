@@ -313,6 +313,15 @@ ModalScreen {
     height: auto;
 }
 
+/* The new-credential fields stay in the DOM full time and are shown or hidden
+   with `display`, so they must not claim a Vertical's default 1fr - that would
+   reserve their rows even while hidden. */
+#new-password-fields,
+#new-key-fields,
+#new-cred-name-fields {
+    height: auto;
+}
+
 .field-row .field {
     margin-right: 2;
 }
