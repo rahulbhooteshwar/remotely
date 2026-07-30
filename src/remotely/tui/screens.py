@@ -73,6 +73,46 @@ def _field(label: str, widget) -> Vertical:
     return box
 
 
+class RevealToggle(Static):
+    """Unmasks the secret field beside it.
+
+    Words rather than an eye glyph: the obvious pictograms are emoji, and a
+    terminal that will not render one shows a replacement box and gets its
+    width wrong, which would shift the field it sits next to.
+    """
+
+    SHOW = "show"
+    HIDE = "hide"
+
+    def __init__(self, field: Input) -> None:
+        super().__init__(self.SHOW, classes="reveal-toggle")
+        self.field = field
+        self.tooltip = "Show or hide this secret"
+
+    def _on_click(self, event) -> None:
+        event.stop()
+        event.prevent_default()
+        self.toggle()
+
+    def toggle(self) -> None:
+        self.field.password = not self.field.password
+        self.update(self.SHOW if self.field.password else self.HIDE)
+
+
+def _secret_field(label: str, field: Input) -> Vertical:
+    """A masked field plus its reveal control.
+
+    Typing a password you cannot read is how a wrong one gets saved, and the
+    only way to find out was to fail a connection - so every masked field in
+    the host and credential forms goes through here.
+    """
+    return Vertical(
+        Label(label, classes="field-label"),
+        Horizontal(field, RevealToggle(field), classes="secret-row"),
+        classes="field",
+    )
+
+
 class RevealedInput(Input):
     """An input in a collapsible section that scrolls itself into view.
 
@@ -411,13 +451,15 @@ class HostFormScreen(CompactOnSmall, ModalScreen[HostFormResult | None]):
                 # so a form saved in the same tick as the change would read
                 # fields that do not exist yet.
                 with Vertical(id="new-password-fields"):
-                    yield _field("Password", RevealedInput(password=True, id="new_password"))
+                    yield _secret_field(
+                        "Password", RevealedInput(password=True, id="new_password")
+                    )
                 with Vertical(id="new-key-fields"):
                     yield _field(
                         "Key path",
                         RevealedInput(placeholder="~/.ssh/id_ed25519", id="new_key_path"),
                     )
-                    yield _field(
+                    yield _secret_field(
                         "Key passphrase (optional)",
                         Input(password=True, id="new_key_passphrase"),
                     )
@@ -662,7 +704,7 @@ class CredentialFormScreen(CompactOnSmall, ModalScreen[Credential | None]):
                     "Username (optional, overrides the host's)",
                     Input(value=(cred.username or "") if cred else "", id="username"),
                 )
-                yield _field(
+                yield _secret_field(
                     "Password",
                     Input(
                         value=(cred.password or "") if cred else "",
@@ -678,7 +720,7 @@ class CredentialFormScreen(CompactOnSmall, ModalScreen[Credential | None]):
                         id="key_path",
                     ),
                 )
-                yield _field(
+                yield _secret_field(
                     "Key passphrase",
                     Input(
                         value=(cred.key_passphrase or "") if cred else "",

@@ -10,13 +10,16 @@ repaint per packet.
 
 from __future__ import annotations
 
+import string
 import time
 
 from rich.segment import Segment
 from rich.spinner import SPINNERS
 from rich.style import Style
 from textual import events
+from textual.geometry import Offset
 from textual.message import Message
+from textual.selection import Selection
 from textual.strip import Strip
 from textual.widget import Widget
 
@@ -175,11 +178,78 @@ class TerminalPane(Widget, can_focus=True):
             self.refresh()
 
     def _on_click(self, event: events.Click) -> None:
-        """Clicking the Retry button reconnects, as well as pressing r."""
+        """The Retry button, and word/line selection.
+
+        Textual's ``Widget._on_click`` calls ``text_select_all()`` on a double
+        click. That is right for a label and badly wrong for a terminal, where
+        it grabbed the entire screen; here a double click takes the word under
+        the pointer and a triple click takes the line. Both suppress the
+        default - Textual walks the MRO itself, and prevent_default() is what
+        stops the base handler from running after this one.
+        """
         if self.is_dead and event.y in self._retry_rows:
             event.prevent_default()
             event.stop()
             self.post_message(self.RetryRequested(self.session))
+            return
+        if event.chain == 2:
+            event.prevent_default()
+            event.stop()
+            self._select_word(event.x, event.y)
+        elif event.chain >= 3:
+            event.prevent_default()
+            event.stop()
+            self._select_line(event.y)
+
+    # ---------------------------------------------------------------- selection
+
+    def _row_text(self, y: int) -> str | None:
+        """The visible row as plain text, or None if there is no such row."""
+        emulator = self.session.emulator
+        if not 0 <= y < emulator.rows:
+            return None
+        try:
+            return "".join(cell.char for cell in emulator.line(y))
+        except Exception:
+            return None
+
+    def _set_selection(self, y: int, start: int, end: int) -> None:
+        self.screen.selections = {self: Selection(Offset(start, y), Offset(end, y))}
+        self.refresh()
+
+    def _select_word(self, x: int, y: int) -> None:
+        text = self._row_text(y)
+        if text is None:
+            return
+        if not 0 <= x < len(text) or text[x] not in WORD_CHARS:
+            # Off a word - blank space, or a separator. Take the single cell
+            # rather than nothing, so the click still visibly did something.
+            self._set_selection(y, x, min(x + 1, len(text)))
+            return
+        start = x
+        while start > 0 and text[start - 1] in WORD_CHARS:
+            start -= 1
+        end = x
+        while end < len(text) and text[end] in WORD_CHARS:
+            end += 1
+        self._set_selection(y, start, end)
+
+    def _select_line(self, y: int) -> None:
+        text = self._row_text(y)
+        if text is None:
+            return
+        # Trailing blanks are padding to the pane width, not content.
+        self._set_selection(y, 0, len(text.rstrip()))
+
+    def clear_screen(self) -> None:
+        """Wipe the pane's screen and scrollback, leaving the remote alone.
+
+        The local equivalent of a terminal's own "clear buffer": no command is
+        injected, so it is safe while a full-screen program is running.
+        """
+        self.session.emulator.clear()
+        self.screen.selections = {}
+        self.refresh()
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         event.stop()
@@ -529,6 +599,13 @@ class TerminalPane(Widget, can_focus=True):
 #: Markers a terminal wraps pasted text in when the remote enables DECSET 2004.
 BRACKET_START = b"\x1b[200~"
 BRACKET_END = b"\x1b[201~"
+
+#: Characters a double click treats as one word. Deliberately wider than
+#: alphanumerics: in a terminal the thing worth grabbing is usually a path, a
+#: host or a flag, so the separators inside those count as word characters -
+#: the same choice iTerm2 and gnome-terminal make. Double-clicking
+#: "deploy@10.0.0.5:~/srv" should give you all of it, not "deploy".
+WORD_CHARS = frozenset(string.ascii_letters + string.digits + "_-./~@:+=%")
 
 #: Keys the terminal never swallows, so the launcher is always reachable.
 RESERVED_KEYS = frozenset(

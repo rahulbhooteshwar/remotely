@@ -2827,3 +2827,238 @@ async def test_keyboard_can_reach_and_delete_a_credential() -> None:
         for _ in range(25):
             await pilot.pause()
         assert isinstance(app.screen, ConfirmScreen)
+
+
+# ------------------------------------------------------- double click selection
+
+
+async def _live_pane(app, pilot, text: bytes):
+    """A connected session whose screen holds `text`."""
+    from remotely.tui.terminal import TerminalPane
+
+    app._connect("prod-web")
+    for _ in range(200):
+        await pilot.pause()
+        if app.sessions.list():
+            break
+    session = app.sessions.list()[0]
+    session.status = "connected"
+    session.emulator.feed(text)
+    pane = app.query_one(f"#{session.id}", TerminalPane)
+    for _ in range(6):
+        await pilot.pause()
+    return session, pane
+
+
+async def test_double_click_selects_a_word_not_the_whole_screen() -> None:
+    """Textual's Widget._on_click calls text_select_all() on a double click.
+
+    Right for a label, badly wrong for a terminal: it grabbed every row on
+    screen, which is what a double click was doing before.
+    """
+    app = build_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        session, pane = await _live_pane(
+            app, pilot, b"alpha beta gamma\r\nsecond line here\r\n"
+        )
+
+        await pilot.click(pane, offset=(7, 0), times=2)  # inside "beta"
+        for _ in range(8):
+            await pilot.pause()
+
+        selected = app.screen.get_selected_text()
+        assert selected == "beta", repr(selected)
+        app.sessions.close_all()
+
+
+async def test_double_click_takes_the_whole_path_or_target() -> None:
+    """A terminal's "word" includes the separators inside paths and hosts."""
+    app = build_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        session, pane = await _live_pane(
+            app, pilot, b"run deploy@10.0.0.5:~/srv/app.log now\r\n"
+        )
+
+        await pilot.click(pane, offset=(10, 0), times=2)
+        for _ in range(8):
+            await pilot.pause()
+
+        assert app.screen.get_selected_text() == "deploy@10.0.0.5:~/srv/app.log"
+        app.sessions.close_all()
+
+
+async def test_triple_click_selects_the_line_without_its_padding() -> None:
+    app = build_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        session, pane = await _live_pane(app, pilot, b"alpha beta gamma\r\nnext\r\n")
+
+        await pilot.click(pane, offset=(4, 0), times=3)
+        for _ in range(8):
+            await pilot.pause()
+
+        selected = app.screen.get_selected_text()
+        assert selected == "alpha beta gamma", repr(selected)
+        assert not selected.endswith(" "), "trailing pad should not be selected"
+        app.sessions.close_all()
+
+
+async def test_double_click_on_blank_space_selects_at_most_one_cell() -> None:
+    """Not nothing - the click should visibly do something - but not the screen."""
+    app = build_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        session, pane = await _live_pane(app, pilot, b"short\r\n")
+
+        await pilot.click(pane, offset=(40, 0), times=2)
+        for _ in range(8):
+            await pilot.pause()
+
+        selected = app.screen.get_selected_text() or ""
+        assert len(selected) <= 1, repr(selected)
+        app.sessions.close_all()
+
+
+# ------------------------------------------------------------- clearing a session
+
+
+async def test_clear_screen_wipes_the_pane_and_its_scrollback() -> None:
+    app = build_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        session, pane = await _live_pane(app, pilot, b"KEEPME line one\r\n")
+        for n in range(60):  # push plenty into history
+            session.emulator.feed(f"filler {n}\r\n".encode())
+        for _ in range(6):
+            await pilot.pause()
+        assert any("KEEPME" in line or "filler" in line
+                   for line in session.emulator.display())
+
+        app.action_clear_screen()
+        for _ in range(10):
+            await pilot.pause()
+
+        assert "".join(session.emulator.display()).strip() == "", "screen not cleared"
+        assert session.emulator.scrollback_offset == 0
+        assert session.emulator.at_live_edge, "left looking scrolled back"
+        # Scrollback is gone, so paging up must find nothing.
+        assert not session.emulator.scroll_up(3), "scrollback survived the clear"
+        app.sessions.close_all()
+
+
+async def test_clear_screen_does_not_write_to_the_remote() -> None:
+    """Injecting a `clear` command would land in whatever holds the keyboard."""
+    app = build_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        session, pane = await _live_pane(app, pilot, b"before\r\n")
+
+        sent: list[bytes] = []
+        original = session.transport.write
+        session.transport.write = lambda data: sent.append(data) or None  # type: ignore
+
+        app.action_clear_screen()
+        for _ in range(10):
+            await pilot.pause()
+
+        assert sent == [], f"wrote {sent!r} to the remote"
+        session.transport.write = original  # type: ignore
+        app.sessions.close_all()
+
+
+async def test_clear_on_the_launcher_says_so_instead_of_failing() -> None:
+    from textual.widgets import Static
+
+    app = build_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.action_clear_screen()
+        for _ in range(8):
+            await pilot.pause()
+        text = "".join(
+            seg.text for seg in app.query_one("#status", Static).render_line(0)
+        )
+        assert "session tab" in text, text
+
+
+async def test_clear_is_reachable_as_a_command() -> None:
+    app = build_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        session, pane = await _live_pane(app, pilot, b"wipe me\r\n")
+
+        app._run_command("clear", "")
+        for _ in range(10):
+            await pilot.pause()
+
+        assert "".join(session.emulator.display()).strip() == ""
+        app.sessions.close_all()
+
+
+# ----------------------------------------------------------- revealing secrets
+
+
+async def test_credential_form_can_unmask_each_secret_independently() -> None:
+    from remotely.models import Credential
+    from remotely.tui.screens import CredentialFormScreen, RevealToggle
+
+    app = build_app()
+    async with app.run_test(size=(92, 34)) as pilot:
+        await pilot.pause()
+        app.push_screen(
+            CredentialFormScreen(
+                Credential(
+                    name="ldap", kind="password",
+                    password="s3cr3t-pw", key_passphrase="pp",
+                )
+            )
+        )
+        for _ in range(15):
+            await pilot.pause()
+        screen = app.screen
+        toggles = {t.field.id: t for t in screen.query(RevealToggle)}
+        assert set(toggles) == {"password", "key_passphrase"}
+        assert all(t.field.password for t in toggles.values()), "should start masked"
+
+        # A real click, not just the method: the toggle sits beside the input
+        # and must not be swallowed by it.
+        await pilot.click(toggles["password"])
+        for _ in range(8):
+            await pilot.pause()
+
+        assert toggles["password"].field.password is False
+        assert toggles["key_passphrase"].field.password is True, (
+            "revealing one secret revealed the other"
+        )
+        row = "".join(
+            seg.text for seg in toggles["password"].field.render_line(0)
+        )
+        assert "s3cr3t-pw" in row, row
+
+        await pilot.click(toggles["password"])
+        for _ in range(8):
+            await pilot.pause()
+        assert toggles["password"].field.password is True, "did not re-mask"
+        row = "".join(seg.text for seg in toggles["password"].field.render_line(0))
+        assert "s3cr3t-pw" not in row, row
+
+
+async def test_host_form_secrets_have_reveal_controls() -> None:
+    from remotely.tui.screens import RevealToggle
+
+    app = build_app()
+    async with app.run_test(size=(92, 40)) as pilot:
+        await pilot.pause()
+        screen = await _open_host_form(app, pilot)
+        toggles = {t.field.id: t for t in screen.query(RevealToggle)}
+        assert set(toggles) == {"new_password", "new_key_passphrase"}
+
+        toggle = toggles["new_password"]
+        assert toggle.field.password is True
+        toggle.toggle()
+        for _ in range(6):
+            await pilot.pause()
+        assert toggle.field.password is False
+        assert toggles["new_key_passphrase"].field.password is True

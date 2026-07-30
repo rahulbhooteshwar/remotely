@@ -179,6 +179,33 @@ class TerminalEmulator:
     def at_live_edge(self) -> bool:
         return self.scrollback_offset == 0
 
+    def clear(self) -> None:
+        """Erase the screen and drop the scrollback.
+
+        The local equivalent of a terminal's own "clear buffer". Nothing is
+        sent to the remote, so this is safe while a full-screen program is
+        running - injecting a ``clear`` command there would land in whatever
+        holds the keyboard instead.
+
+        pyte's ``history`` is a NamedTuple, so ``position`` cannot be assigned;
+        it is rebuilt with ``_replace`` once the deques are empty. Without that
+        ``scrollback_offset`` would keep reporting history that no longer
+        exists and the pane would look permanently scrolled back.
+        """
+        self.scroll_to_live()
+        try:
+            self.screen.erase_in_display(2)
+            self.screen.cursor_position()
+        except Exception:
+            pass
+        history = getattr(self.screen, "history", None)
+        if history is not None:
+            history.top.clear()
+            history.bottom.clear()
+            self.screen.history = history._replace(position=history.size)
+        # Every row changed, so the pane has to repaint all of them.
+        self.screen.dirty.update(range(self.rows))
+
     def resize(self, cols: int, rows: int) -> None:
         cols = max(int(cols), 2)
         rows = max(int(rows), 2)

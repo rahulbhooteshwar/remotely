@@ -192,6 +192,7 @@ The input at the top is the only control surface. It completes as you type.
 | `R` | reconnect a disconnected session (or click **Retry** in the overlay) |
 | mouse wheel | scroll the session |
 | drag | select session text - copied to the clipboard when you release |
+| double / triple click | select the word / the line under the pointer |
 | paste | your terminal's paste shortcut sends the text to the remote |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | previous / next tab |
 | wheel over the tab row | scroll the tabs (or hold the pointer at either edge) |
@@ -201,6 +202,7 @@ The input at the top is the only control surface. It completes as you type.
 | `Ctrl+K` | vault |
 | `Ctrl+L` | open sessions |
 | `F1` | help |
+| `Ctrl+Shift+K` | clear the session's screen and scrollback (also forces a full redraw) |
 | `Ctrl+Q` | quit, closing all sessions |
 
 ### Commands
@@ -212,6 +214,7 @@ The input at the top is the only control surface. It completes as you type.
 /delete <host>    delete a host            /lock            lock the vault
 /sessions         switch or close tabs     /export <path>   export hosts
 /close [host]     close a tab              /import <path>   import hosts
+/clear            clear this tab's screen
 /help  /quit
 ```
 
@@ -219,6 +222,19 @@ The input at the top is the only control surface. It completes as you type.
 use **Close Selected Tab** / **Close All Tabs** to close them without leaving -
 the list refreshes and stays open so you can close several in a row. **Ok**
 leaves the dialog and touches nothing.
+
+### Clearing a session
+
+`Ctrl+Shift+K`, or `/clear`, wipes the current tab's screen and its scrollback.
+Nothing is sent to the remote, so it is safe while a full-screen program is
+running - and it forces a full redraw of the whole app at the same time.
+
+> **Use it instead of your terminal's own clear shortcut.** `Cmd+K` in iTerm2
+> (and its equivalents elsewhere) is handled by the terminal, not by Remotely -
+> it erases the cells Remotely has drawn without Remotely knowing, so the layout
+> goes blank until something happens to redraw it, while the session's own
+> content is untouched because the remote never heard about it. That keystroke
+> cannot be intercepted; `Ctrl+Shift+K` does what you meant.
 
 ## Configuration
 

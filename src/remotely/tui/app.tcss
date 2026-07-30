@@ -330,6 +330,30 @@ ModalScreen {
     color: #8b98b0;
 }
 
+/* A masked input and its reveal control on one row. The Input keeps its border,
+   so the row is the Input's own height and the toggle centres against it. */
+.secret-row {
+    width: 100%;
+    height: auto;
+}
+
+.secret-row Input {
+    width: 1fr;
+}
+
+.reveal-toggle {
+    width: 6;
+    height: 3;
+    content-align: center middle;
+    color: #8b98b0;
+    pointer: pointer;
+}
+
+.reveal-toggle:hover {
+    color: #cddcff;
+    background: #33415c;
+}
+
 .modal OptionList {
     height: auto;
     max-height: 22;

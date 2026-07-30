@@ -136,6 +136,16 @@ broken twice. `TerminalPane.render_line` applies the highlight itself from
 the same colour (`#064273 on #064273`), so applying both paints an unreadable
 block.
 
+**Double and triple click are ours too.** `Widget._on_click` calls
+`text_select_all()` when `event.chain == 2` — sensible for a label, and for a
+terminal it selected the entire screen. `TerminalPane._on_click` handles chain 2
+as the word under the pointer and chain 3 as the line, and calls
+`prevent_default()`, which is what stops Textual's base handler from running
+after ours as it walks the MRO. `WORD_CHARS` is wider than alphanumerics on
+purpose: double-clicking `deploy@10.0.0.5:~/srv` should give all of it, the way
+iTerm2 behaves. Off a word the selection is a single cell rather than nothing, so
+the click still visibly did something.
+
 Copy happens on mouse-up (`events.TextSelected` → `copy_to_clipboard`), not via
 Textual's `ctrl+c` binding, because `ctrl+c` has to reach the remote shell.
 
@@ -355,6 +365,15 @@ This is why `SystemSSHTransport` refuses a stored password rather than trying to
 smuggle it across a process boundary — reintroducing that path would undo the
 main security gain of the rewrite.
 
+Every masked field in the host and credential forms is built by
+`screens._secret_field()`, which pairs the `Input` with a `RevealToggle` that
+flips `Input.password`. Use it for any new secret field: typing a password you
+cannot read is how a wrong one gets saved, and the only symptom was a failed
+connection later. The toggle's label is the words `show`/`hide` rather than an
+eye glyph — the obvious pictograms are emoji, and a terminal that cannot render
+one reports the wrong width and shifts the field beside it. `PasscodeScreen` is
+deliberately **not** included: its confirm field exists to catch typos.
+
 ### Creating a credential from the host form
 
 The Authentication dropdown lists, in this order: `password based`, `ssh key
@@ -409,7 +428,29 @@ host pointing at it. Blank names auto-resolve via `unique_credential_name`.
 `tui/terminal.py:RESERVED_KEYS` is the escape hatch: `ctrl+w`, `ctrl+q`, `f1`
 and the tab-switch keys never reach the remote, so the user can always get back
 to the launcher. **Everything else must pass through**, including `ctrl+c` and
-`ctrl+d` — intercepting those would break the shell.
+`ctrl+d` — intercepting those would break the shell. Priority bindings in
+`RemotelyApp.BINDINGS` are checked before the focused pane sees the key, so they
+are reserved in practice too, whether or not they are in that set.
+
+### Clearing a session
+
+A terminal's own clear-buffer shortcut (`cmd+K` in iTerm2 and friends) is handled
+by the terminal and **never reaches the app** — there is no escape sequence for
+it and nothing to intercept. It erases the cells Remotely has drawn without
+Remotely knowing, so the layout goes blank until something triggers a redraw,
+while the session's content is untouched because the remote never heard about it.
+Do not go looking for a way to detect it; there isn't one.
+
+`action_clear_screen` (bound to `ctrl+shift+k`, plus `/clear`) is the route that
+works. It does two things on purpose: `refresh(layout=True)` repaints every cell
+rather than the ones Textual thinks changed — which is what an
+already-blanked-out terminal needs — and `TerminalEmulator.clear()` erases the
+screen and drops the scrollback **locally**. Nothing is written to the remote:
+injecting a `clear` command would land in whatever holds the keyboard, which
+could be an editor. `clear()` also has to rebuild `screen.history` with
+`_replace(position=size)` — it is a NamedTuple, and leaving `position` stale
+makes `scrollback_offset` report history that no longer exists, so the pane looks
+permanently scrolled back.
 
 ### ssh_options semantics
 

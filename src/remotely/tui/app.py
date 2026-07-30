@@ -294,6 +294,7 @@ class RemotelyApp(App[None]):
         Binding("ctrl+k", "vault", "Vault", priority=True),
         Binding("ctrl+l", "sessions", "Tabs", priority=True),
         Binding("ctrl+r", "reload", "Reload", priority=True),
+        Binding("ctrl+shift+k", "clear_screen", "Clear", priority=True),
     ]
 
     def __init__(
@@ -800,6 +801,7 @@ class RemotelyApp(App[None]):
             "delete": lambda: self._delete_host(argument),
             "sessions": self.action_sessions,
             "close": lambda: self._close_by_name(argument),
+            "clear": self.action_clear_screen,
             "themes": self.action_themes,
             "vault": self.action_vault,
             "settings": self.action_settings,
@@ -1010,6 +1012,33 @@ class RemotelyApp(App[None]):
     @on(SessionTab.CloseRequested)
     def _on_tab_close_clicked(self, event: SessionTab.CloseRequested) -> None:
         self._request_close(event.tab_id)
+
+    def action_clear_screen(self) -> None:
+        """Clear the current session's screen, and repaint the whole app.
+
+        The repaint is the other half of the problem this solves. A terminal's
+        own clear-buffer shortcut (cmd+K in iTerm2, and friends) is handled by
+        the terminal and never reaches us, so it wipes the cells Remotely has
+        drawn without Remotely knowing: the app looks blank until something
+        happens to redraw it, and the remote's screen is untouched because the
+        remote never heard about it. There is no way to detect that keystroke,
+        so this gives the same intent a route that works - clearing the session
+        for real, and forcing a full redraw so a already-blanked layout comes
+        back at the same time.
+        """
+        # layout=True forces every cell, not just the ones Textual thinks
+        # changed - which is exactly what a blanked-out terminal needs.
+        self.refresh(layout=True)
+        current = self._tabs().active
+        if not current or current == LAUNCHER_TAB:
+            self._status("Switch to a session tab to clear it.")
+            return
+        try:
+            pane = self.query_one(f"#{current}", TerminalPane)
+        except NoMatches:
+            return
+        pane.clear_screen()
+        self._status("Cleared the session screen.")
 
     def action_close_tab(self) -> None:
         """Close the session on the current tab."""
