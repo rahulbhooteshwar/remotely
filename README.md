@@ -268,7 +268,10 @@ Credentials are **named and shareable**. Create one called `ldap`, point twenty
 hosts at it, rotate it once. A host can equally have its own private credential,
 or use `agent` mode and rely on your ssh agent.
 
-Password and key auth are both supported, including key passphrases.
+Password and key auth are both supported, including key passphrases. The form
+shows only the fields the selected **Kind** uses - a password credential has no
+key path, a key credential has no password - and saving keeps only those, so
+switching kind never leaves a stale secret behind in the vault.
 
 ### Managing them
 

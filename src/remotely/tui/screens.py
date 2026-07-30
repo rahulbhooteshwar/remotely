@@ -667,6 +667,9 @@ class CredentialFormScreen(CompactOnSmall, ModalScreen[Credential | None]):
         super().__init__()
         self.original = credential
         self.existing_names = list(existing_names)
+        #: The kind already reflected on screen, so the Changed message Textual
+        #: posts when the Select mounts is not mistaken for the user switching.
+        self._last_kind = ""
 
     def _name_conflict(self, name: str) -> str:
         """Complaint about ``name`` already being taken, or "" if it is free.
@@ -691,11 +694,12 @@ class CredentialFormScreen(CompactOnSmall, ModalScreen[Credential | None]):
             yield Label("Edit credential" if cred else "New credential", classes="modal-title")
             with VerticalScroll(classes="form-scroll"):
                 yield _field("Name", Input(value=cred.name if cred else "", id="name"))
+                self._last_kind = cred.kind if cred else "password"
                 yield _field(
                     "Kind",
                     Select(
                         [("password", "password"), ("ssh key", "key")],
-                        value=cred.kind if cred else "password",
+                        value=self._last_kind,
                         allow_blank=False,
                         id="kind",
                     ),
@@ -704,30 +708,36 @@ class CredentialFormScreen(CompactOnSmall, ModalScreen[Credential | None]):
                     "Username (optional, overrides the host's)",
                     Input(value=(cred.username or "") if cred else "", id="username"),
                 )
-                yield _secret_field(
-                    "Password",
-                    Input(
-                        value=(cred.password or "") if cred else "",
-                        password=True,
-                        id="password",
-                    ),
-                )
-                yield _field(
-                    "Key path",
-                    Input(
-                        value=(cred.key_path or "") if cred else "",
-                        placeholder="~/.ssh/id_ed25519",
-                        id="key_path",
-                    ),
-                )
-                yield _secret_field(
-                    "Key passphrase",
-                    Input(
-                        value=(cred.key_passphrase or "") if cred else "",
-                        password=True,
-                        id="key_passphrase",
-                    ),
-                )
+                # Only one kind's fields are ever relevant. Both stay mounted
+                # and are shown or hidden by `display`, for the same reason as
+                # the host form: mount() is async, so building them on demand
+                # would race a save in the same tick.
+                with Vertical(id="cred-password-fields"):
+                    yield _secret_field(
+                        "Password",
+                        RevealedInput(
+                            value=(cred.password or "") if cred else "",
+                            password=True,
+                            id="password",
+                        ),
+                    )
+                with Vertical(id="cred-key-fields"):
+                    yield _field(
+                        "Key path",
+                        RevealedInput(
+                            value=(cred.key_path or "") if cred else "",
+                            placeholder="~/.ssh/id_ed25519",
+                            id="key_path",
+                        ),
+                    )
+                    yield _secret_field(
+                        "Key passphrase",
+                        Input(
+                            value=(cred.key_passphrase or "") if cred else "",
+                            password=True,
+                            id="key_passphrase",
+                        ),
+                    )
                 yield _field(
                     "Description",
                     Input(value=cred.description if cred else "", id="description"),
@@ -738,19 +748,57 @@ class CredentialFormScreen(CompactOnSmall, ModalScreen[Credential | None]):
                 yield _button("Save", id="save", variant="primary")
 
     def on_mount(self) -> None:
+        self._sync_kind_fields()
         self.query_one("#name", Input).focus()
+
+    def _kind(self) -> str:
+        return str(self.query_one("#kind", Select).value)
+
+    def _sync_kind_fields(self) -> None:
+        """Show only the fields the selected kind uses."""
+        kind = self._kind()
+        self.query_one("#cred-password-fields").display = kind == "password"
+        self.query_one("#cred-key-fields").display = kind == "key"
+
+    @on(Select.Changed, "#kind")
+    def _kind_changed(self) -> None:
+        self._sync_kind_fields()
+        kind = self._kind()
+        previous, self._last_kind = self._last_kind, kind
+        if kind == previous:
+            # The Changed message Textual posts when the Select mounts, echoing
+            # the value we gave it. Acting on it would pull the cursor out of
+            # the Name field on a form nobody had touched yet.
+            return
+        selector = "#password" if kind == "password" else "#key_path"
+        try:
+            field = self.query_one(selector, RevealedInput)
+        except NoMatches:  # pragma: no cover - both are always composed
+            return
+        # The section that just appeared can sit below the fold; RevealedInput
+        # scrolls itself into view once the layout has given it a region.
+        field.reveal_on_show = True
+        field.focus()
 
     def action_save(self) -> None:
         def value_of(widget_id: str) -> str:
             return self.query_one(f"#{widget_id}", Input).value
 
+        # Only the selected kind's secrets are kept. The other kind's fields are
+        # hidden, not cleared, so reading them anyway would persist a secret the
+        # user cannot see and no code path will ever use - and switching a
+        # credential to a key would leave its old password sitting in the vault.
+        kind = self._kind()
+        is_password = kind == "password"
         credential = Credential(
             name=value_of("name").strip(),
-            kind=str(self.query_one("#kind", Select).value),  # type: ignore[arg-type]
+            kind=kind,  # type: ignore[arg-type]
             username=value_of("username").strip() or None,
-            password=value_of("password") or None,
-            key_path=value_of("key_path").strip() or None,
-            key_passphrase=value_of("key_passphrase") or None,
+            password=(value_of("password") or None) if is_password else None,
+            key_path=(value_of("key_path").strip() or None) if not is_password else None,
+            key_passphrase=(
+                (value_of("key_passphrase") or None) if not is_password else None
+            ),
             description=value_of("description").strip(),
         )
         problems = credential.validate()

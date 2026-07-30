@@ -318,7 +318,9 @@ ModalScreen {
    reserve their rows even while hidden. */
 #new-password-fields,
 #new-key-fields,
-#new-cred-name-fields {
+#new-cred-name-fields,
+#cred-password-fields,
+#cred-key-fields {
     height: auto;
 }
 

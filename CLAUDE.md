@@ -233,6 +233,20 @@ the list come first. It used to be a leading "Close", which in a dialog full of
 closable things read as "close the highlighted tab" while actually closing only
 the dialog.
 
+### The credential form's kind
+
+`CredentialFormScreen` shows only the selected kind's secrets — password, or key
+path plus passphrase — using the same show/hide-by-`display` pattern as the host
+form, and with the same two gotchas: `_last_kind` guards against the
+`Select.Changed` Textual posts at mount (which would otherwise pull focus off
+the Name field), and the revealed field is a `RevealedInput` so it scrolls
+itself into view once the layout gives it a region.
+
+`action_save` reads **only** the selected kind's fields. The hidden ones keep
+their values, so reading them anyway would persist a secret the user cannot see
+and no code path reads — switching a credential to a key would leave its old
+password in the vault. Keep that filter if you add a kind.
+
 ### The vault browser
 
 `CredentialListScreen` is **not** a `ListPickerScreen` — an OptionList row is

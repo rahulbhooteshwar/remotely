@@ -3062,3 +3062,144 @@ async def test_host_form_secrets_have_reveal_controls() -> None:
             await pilot.pause()
         assert toggle.field.password is False
         assert toggles["new_key_passphrase"].field.password is True
+
+
+# ------------------------------------------------- credential kind: only its fields
+
+
+KIND_FIELDS = ("password", "key_path", "key_passphrase")
+
+
+async def _cred_form(app, pilot, credential=None):
+    from remotely.tui.screens import CredentialFormScreen
+
+    app.push_screen(CredentialFormScreen(credential))
+    for _ in range(20):
+        await pilot.pause()
+    assert isinstance(app.screen, CredentialFormScreen)
+    return app.screen
+
+
+def _visible_kind_fields(screen) -> list[str]:
+    """Fields with real screen area - display=False leaves a zero region."""
+    return [f for f in KIND_FIELDS if screen.query_one(f"#{f}").region.height]
+
+
+async def test_a_password_credential_shows_no_key_fields() -> None:
+    from remotely.models import Credential
+
+    app = build_app()
+    async with app.run_test(size=(92, 34)) as pilot:
+        await pilot.pause()
+        screen = await _cred_form(
+            app, pilot, Credential(name="ldap", kind="password", password="pw")
+        )
+        assert _visible_kind_fields(screen) == ["password"]
+
+
+async def test_a_key_credential_shows_no_password_field() -> None:
+    from remotely.models import Credential
+
+    app = build_app()
+    async with app.run_test(size=(92, 34)) as pilot:
+        await pilot.pause()
+        screen = await _cred_form(
+            app,
+            pilot,
+            Credential(name="dk", kind="key", key_path="~/.ssh/id_ed25519"),
+        )
+        assert _visible_kind_fields(screen) == ["key_path", "key_passphrase"]
+
+
+async def test_a_new_credential_starts_on_password_only() -> None:
+    app = build_app()
+    async with app.run_test(size=(92, 34)) as pilot:
+        await pilot.pause()
+        screen = await _cred_form(app, pilot)
+        assert _visible_kind_fields(screen) == ["password"]
+        assert app.focused is not None and app.focused.id == "name", (
+            "the mount-time Changed echo stole the cursor"
+        )
+
+
+async def test_switching_kind_swaps_the_fields_and_focuses_the_new_one() -> None:
+    from textual.widgets import Select
+
+    app = build_app()
+    async with app.run_test(size=(92, 34)) as pilot:
+        await pilot.pause()
+        screen = await _cred_form(app, pilot)
+        select = screen.query_one("#kind", Select)
+
+        select.value = "key"
+        for _ in range(20):
+            await pilot.pause()
+        assert _visible_kind_fields(screen) == ["key_path", "key_passphrase"]
+        assert app.focused is not None and app.focused.id == "key_path"
+        scroll = screen.query_one(".form-scroll")
+        assert scroll.region.contains_region(screen.query_one("#key_path").region)
+
+        select.value = "password"
+        for _ in range(20):
+            await pilot.pause()
+        assert _visible_kind_fields(screen) == ["password"]
+        assert app.focused is not None and app.focused.id == "password"
+
+
+async def test_switching_kind_does_not_persist_the_other_kinds_secret() -> None:
+    """The hidden fields keep their values, so save must ignore them.
+
+    Otherwise a credential switched to a key would carry its old password into
+    the vault - a secret the user cannot see and nothing will ever read.
+    """
+    from remotely.models import Credential
+    from textual.widgets import Input, Select
+
+    app = build_app()
+    async with app.run_test(size=(92, 34)) as pilot:
+        await pilot.pause()
+        screen = await _cred_form(
+            app, pilot, Credential(name="ldap", kind="password", password="old-pw")
+        )
+        screen.query_one("#kind", Select).value = "key"
+        for _ in range(20):
+            await pilot.pause()
+        screen.query_one("#key_path", Input).value = "~/.ssh/id_rsa"
+
+        saved: list = []
+        screen.dismiss = lambda credential: saved.append(credential)  # type: ignore
+        screen.action_save()
+        for _ in range(8):
+            await pilot.pause()
+
+        assert saved, "the form did not save"
+        cred = saved[0]
+        assert cred.kind == "key"
+        assert cred.key_path == "~/.ssh/id_rsa"
+        assert cred.password is None, f"the old password was kept: {cred.password!r}"
+
+
+async def test_a_password_credential_drops_a_stale_key_path() -> None:
+    from remotely.models import Credential
+    from textual.widgets import Input, Select
+
+    app = build_app()
+    async with app.run_test(size=(92, 34)) as pilot:
+        await pilot.pause()
+        screen = await _cred_form(
+            app, pilot, Credential(name="dk", kind="key", key_path="~/.ssh/id_ed25519")
+        )
+        screen.query_one("#kind", Select).value = "password"
+        for _ in range(20):
+            await pilot.pause()
+        screen.query_one("#password", Input).value = "new-pw"
+
+        saved: list = []
+        screen.dismiss = lambda credential: saved.append(credential)  # type: ignore
+        screen.action_save()
+        for _ in range(8):
+            await pilot.pause()
+
+        cred = saved[0]
+        assert cred.kind == "password" and cred.password == "new-pw"
+        assert cred.key_path is None and cred.key_passphrase is None
