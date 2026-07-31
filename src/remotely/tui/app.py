@@ -295,6 +295,7 @@ class RemotelyApp(App[None]):
         Binding("ctrl+l", "sessions", "Tabs", priority=True),
         Binding("ctrl+r", "reload", "Reload", priority=True),
         Binding("ctrl+shift+k", "clear_screen", "Clear", priority=True),
+        Binding("ctrl+shift+f", "find_in_session", "Find", priority=True),
     ]
 
     def __init__(
@@ -802,6 +803,7 @@ class RemotelyApp(App[None]):
             "sessions": self.action_sessions,
             "close": lambda: self._close_by_name(argument),
             "clear": self.action_clear_screen,
+            "find": lambda: self._find_in_session(argument),
             "themes": self.action_themes,
             "vault": self.action_vault,
             "settings": self.action_settings,
@@ -1029,16 +1031,65 @@ class RemotelyApp(App[None]):
         # layout=True forces every cell, not just the ones Textual thinks
         # changed - which is exactly what a blanked-out terminal needs.
         self.refresh(layout=True)
-        current = self._tabs().active
-        if not current or current == LAUNCHER_TAB:
+        pane = self._active_pane()
+        if pane is None:
             self._status("Switch to a session tab to clear it.")
-            return
-        try:
-            pane = self.query_one(f"#{current}", TerminalPane)
-        except NoMatches:
             return
         pane.clear_screen()
         self._status("Cleared the session screen.")
+
+    def _active_pane(self) -> TerminalPane | None:
+        current = self._tabs().active
+        if not current or current == LAUNCHER_TAB:
+            return None
+        try:
+            return self.query_one(f"#{current}", TerminalPane)
+        except NoMatches:
+            return None
+
+    @work
+    async def action_find_in_session(self) -> None:
+        """Ask for a term and highlight it in the current session."""
+        pane = self._active_pane()
+        if pane is None:
+            self._status("Switch to a session tab to search it.")
+            return
+        term = await self.push_screen_wait(
+            TextPromptScreen(
+                f"Find in {pane.session.host_name}",
+                placeholder="text to highlight",
+                value=pane.search_term,
+                help="Highlights every match on screen. Leave blank to clear.",
+            )
+        )
+        if term is None:
+            return
+        self._apply_search(pane, term)
+
+    def _find_in_session(self, argument: str) -> None:
+        """`/find`, with the term inline or prompted for when omitted."""
+        if not argument:
+            self.action_find_in_session()
+            return
+        pane = self._active_pane()
+        if pane is None:
+            self._status("Switch to a session tab to search it.")
+            return
+        self._apply_search(pane, argument)
+
+    def _apply_search(self, pane: TerminalPane, term: str) -> None:
+        count = pane.set_search(term)
+        if not pane.search_term:
+            self._status("Search cleared.")
+            return
+        # Only the visible screen is searched, so say so rather than let a 0
+        # read as "this host has never seen that string".
+        plural = "" if count == 1 else "es"
+        self._status(
+            f"[b]{pane.search_term}[/b]: {count} match{plural} on screen."
+            if count
+            else f"No match for [b]{pane.search_term}[/b] on the visible screen."
+        )
 
     def action_close_tab(self) -> None:
         """Close the session on the current tab."""

@@ -281,3 +281,124 @@ def test_system_ssh_refuses_stored_password() -> None:
     transport = create_transport(host, password_credential())
     with pytest.raises(TransportError, match="cannot be given a stored password"):
         transport.connect(80, 24)
+
+
+# ------------------------------------------------- diagnostics: log and banner
+
+
+def test_verbose_is_read_from_the_hosts_ssh_options() -> None:
+    """Both the real ssh option and the flag people actually type."""
+    cred = Credential(name="pw", kind="password", password=PASSWORD)
+    base = dict(name="h", hostname="e.com", username="u",
+                auth_mode="credential", credential="pw")
+
+    assert not build_spec(Host(**base), cred).verbose
+    assert build_spec(Host(**base, ssh_options=["LogLevel=DEBUG"]), cred).verbose
+    assert build_spec(Host(**base, ssh_options=["LogLevel=VERBOSE"]), cred).verbose
+    assert build_spec(Host(**base, ssh_options=["-v"]), cred).verbose
+    assert not build_spec(Host(**base, ssh_options=["LogLevel=QUIET"]), cred).verbose
+
+
+def test_verbose_options_are_not_flagged_as_system_ssh_only() -> None:
+    cred = Credential(name="pw", kind="password", password=PASSWORD)
+    spec = build_spec(
+        Host(name="h", hostname="e.com", username="u", auth_mode="credential",
+             credential="pw", ssh_options=["LogLevel=DEBUG"]),
+        cred,
+    )
+    assert spec.notes == [], spec.notes
+
+
+def test_a_successful_connect_reports_its_progress(server: SSHTestServer) -> None:
+    spec = build_spec(
+        host_for(server), Credential(name="pw", kind="password", password=PASSWORD)
+    )
+    transport = ParamikoTransport(spec)
+    entries: list[tuple[str, str]] = []
+    transport.on_log = lambda level, message: entries.append((level, message))
+    try:
+        transport.connect(80, 24)
+    finally:
+        transport.close()
+
+    text = " | ".join(message for _level, message in entries)
+    assert "Authenticating as" in text, text
+    assert "Authenticated." in text, text
+    assert not [m for level, m in entries if level == "debug"], (
+        "paramiko's own logging should be off unless the host asked for it"
+    )
+
+
+def test_verbose_adds_paramikos_own_handshake_logging(server: SSHTestServer) -> None:
+    spec = build_spec(
+        host_for(server, ssh_options=["LogLevel=DEBUG"]),
+        Credential(name="pw", kind="password", password=PASSWORD),
+    )
+    transport = ParamikoTransport(spec)
+    entries: list[tuple[str, str]] = []
+    transport.on_log = lambda level, message: entries.append((level, message))
+    try:
+        transport.connect(80, 24)
+    finally:
+        transport.close()
+
+    debug = [m for level, m in entries if level == "debug"]
+    assert len(debug) > 5, f"expected a verbose handshake, got {entries}"
+
+
+def test_a_failed_login_still_captures_the_servers_banner(host_key) -> None:
+    """The case that matters: the transport is inactive by the time we ask.
+
+    `Transport.get_banner()` returns None once the connection is torn down,
+    which is exactly the state a rejected password leaves it in - and the
+    banner is often the server explaining the refusal.
+    """
+    banner = "*** AUTHORIZED USE ONLY ***\nAll activity is monitored."
+    with SSHTestServer(host_key=host_key, auth_banner=banner) as server:
+        spec = build_spec(
+            host_for(server),
+            Credential(name="pw", kind="password", password="wrong-password"),
+        )
+        transport = ParamikoTransport(spec)
+        entries: list[tuple[str, str]] = []
+        transport.on_log = lambda level, message: entries.append((level, message))
+        with pytest.raises(AuthFailed):
+            transport.connect(80, 24)
+
+        assert "AUTHORIZED USE ONLY" in transport.banner, transport.banner
+        assert any(level == "banner" for level, _ in entries), entries
+        # The raw failure has to survive the friendly translation.
+        raw = [m for level, m in entries if level == "error"]
+        assert any("AuthenticationException" in m for m in raw), raw
+
+
+def test_a_successful_login_captures_the_banner_too(host_key) -> None:
+    banner = "Welcome to the jungle"
+    with SSHTestServer(host_key=host_key, auth_banner=banner) as server:
+        spec = build_spec(
+            host_for(server),
+            Credential(name="pw", kind="password", password=PASSWORD),
+        )
+        transport = ParamikoTransport(spec)
+        try:
+            transport.connect(80, 24)
+            assert banner in transport.banner
+        finally:
+            transport.close()
+
+
+def test_the_log_handler_is_detached_on_close(server: SSHTestServer) -> None:
+    """Left attached, the logger would pin the session's log list for the run."""
+    import logging
+
+    spec = build_spec(
+        host_for(server, ssh_options=["LogLevel=DEBUG"]),
+        Credential(name="pw", kind="password", password=PASSWORD),
+    )
+    transport = ParamikoTransport(spec)
+    transport.on_log = lambda level, message: None
+    transport.connect(80, 24)
+    channel = transport._log_channel
+    assert logging.getLogger(channel).handlers, "handler was never attached"
+    transport.close()
+    assert not logging.getLogger(channel).handlers, "handler outlived the transport"

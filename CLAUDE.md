@@ -446,6 +446,52 @@ to the launcher. **Everything else must pass through**, including `ctrl+c` and
 `RemotelyApp.BINDINGS` are checked before the focused pane sees the key, so they
 are reserved in practice too, whether or not they are in that set.
 
+### Connection diagnostics
+
+`Session.log` is a `(level, text)` list written from the connect thread and read
+on the UI thread — it shares `_lock` with the byte buffer for that reason, and
+`log_snapshot()` is what the UI calls. It is capped at `LOG_LIMIT`; a long
+session keeps logging and nothing else trims it.
+
+`SessionManager._handshake` sets `transport.on_log` **before** calling
+`connect()`, or the early lines are lost. The transport logs its own progress
+and, when `spec.verbose`, paramiko's too — through a **per-connection log
+channel** (`client.set_log_channel`), not the global `paramiko` logger, because
+two hosts connecting at once would otherwise interleave into both sessions'
+logs. `propagate = False` keeps it off the root logger: stderr is the drawn UI.
+`close()` must detach the handler or the logger pins the session for the run.
+
+`spec.verbose` comes from the host's ssh options — `LogLevel=DEBUG|VERBOSE|…`
+or a bare `-v`. Both are in `TRANSLATED_OPTIONS` so the UI does not warn that
+they are system-ssh-only.
+
+**Banner capture has a trap.** `Transport.get_banner()` returns None once the
+transport is inactive, which is exactly the state a rejected password leaves it
+in — and that is the banner most worth showing. `_capture_banner` falls back to
+`transport.auth_handler.banner`, and is called on the failure path *before*
+`_translate`, while the client is still around.
+
+`_translate` still returns friendly text, but the raw exception is logged first,
+so the overlay reads well and the log keeps the truth.
+
+### The failure overlay and the log view
+
+`TerminalPane.shows_log` means "this session never got a shell, so its body is
+the connection log rather than a terminal". `_overlay_hidden` is set by `escape`
+(`dismiss_overlay`) so the panel can be got out of the way — the whole point
+being that a failure panel must never be the thing hiding the explanation. Both
+reset in `restart()`, and `prepare_retry` clears the log itself so two attempts
+never mix.
+
+### Searching a session
+
+`TerminalPane.search_term` is highlighted per row in `_terminal_segments`,
+before the selection style so a selection still wins. The colour is the
+session's theme accent on the theme's dark background, cached because it is
+asked for per cell. Only the visible screen is searched — the status line says
+"on screen" for that reason, so an empty result never reads as "this host never
+printed that".
+
 ### Clearing a session
 
 A terminal's own clear-buffer shortcut (`cmd+K` in iTerm2 and friends) is handled

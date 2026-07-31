@@ -46,6 +46,8 @@ COMMANDS: tuple[Command, ...] = (
     Command("sessions", "List and switch to open tabs", aliases=("tabs",)),
     Command("close", "Close this tab, or a host's sessions", "host", "[host]"),
     Command("clear", "Clear this tab's screen and scrollback", aliases=("cls",)),
+    Command("find", "Highlight text in this tab", arg_label="[text]",
+            aliases=("search", "grep")),
     Command("themes", "Browse, preview and clone themes", "theme", "[theme]"),
     Command("vault", "Manage stored credentials", aliases=("creds",)),
     Command("settings", "Change preferences", aliases=("prefs", "preferences")),

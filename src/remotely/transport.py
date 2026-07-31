@@ -15,6 +15,8 @@ layer needs to drive them.
 
 from __future__ import annotations
 
+import itertools
+import logging
 import os
 import shlex
 import shutil
@@ -71,6 +73,9 @@ class ConnectionSpec:
     key_passphrase: str | None = None
     allow_agent: bool = True
     strict_host_keys: bool = False
+    #: Report paramiko's own handshake logging into the session log. Driven by
+    #: the host's ssh options, so the same "-v" habit works here.
+    verbose: bool = False
     connect_timeout: float = CONNECT_TIMEOUT
     keepalive: int = KEEPALIVE_SECONDS
     term: str = DEFAULT_TERM
@@ -83,6 +88,12 @@ class ConnectionSpec:
         return f"{self.username}@{self.hostname}"
 
 
+#: ssh LogLevel values that mean "tell me everything".
+VERBOSE_LOG_LEVELS = frozenset({"verbose", "debug", "debug1", "debug2", "debug3"})
+
+#: Bare verbosity flags, accepted in the ssh options list for convenience.
+VERBOSE_FLAGS = frozenset({"-v", "-vv", "-vvv", "v", "vv", "vvv", "verbose"})
+
 #: ssh -o options we can honour natively. Anything else only applies to the
 #: system-ssh transport, and the UI says so rather than silently ignoring it.
 TRANSLATED_OPTIONS = {
@@ -93,6 +104,7 @@ TRANSLATED_OPTIONS = {
     "pubkeyauthentication",
     "passwordauthentication",
     "identitiesonly",
+    "loglevel",
 }
 
 
@@ -147,6 +159,12 @@ def build_spec(host: Host, credential: Credential | None) -> ConnectionSpec:
                 pass
         elif key == "stricthostkeychecking":
             spec.strict_host_keys = value.lower() in ("yes", "true")
+        elif key == "loglevel":
+            spec.verbose = value.lower() in VERBOSE_LOG_LEVELS
+        elif key in VERBOSE_FLAGS:
+            # Bare "-v"/"-vv" is not an -o option, but it is what people type,
+            # so accept it in the same list rather than silently ignoring it.
+            spec.verbose = True
         elif key not in TRANSLATED_OPTIONS:
             spec.notes.append(f"ssh option {option!r} applies only to system ssh")
 
@@ -157,6 +175,24 @@ def known_hosts_path() -> Path:
     return config.home() / "known_hosts"
 
 
+class _LogForwarder(logging.Handler):
+    """Feeds paramiko's own records into a session's connection log."""
+
+    def __init__(self, sink) -> None:
+        super().__init__()
+        self.sink = sink
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = "error" if record.levelno >= logging.WARNING else "debug"
+            self.sink(level, record.getMessage())
+        except Exception:  # a logging handler must never raise
+            pass
+
+
+_log_channels = itertools.count(1)
+
+
 class ParamikoTransport:
     """In-process SSH. The default, and the reason nothing has to be installed."""
 
@@ -165,11 +201,76 @@ class ParamikoTransport:
         self._client = None
         self._channel = None
         self._exit_status: int | None = None
+        #: Set by SessionManager before connect(); called as (level, message).
+        self.on_log = None
+        #: The server's pre-auth banner, if it sent one.
+        self.banner: str = ""
+        self._log_handler: _LogForwarder | None = None
+        self._log_channel = ""
+
+    # ------------------------------------------------------------------ logging
+
+    def _log(self, level: str, message: str) -> None:
+        if self.on_log is not None:
+            self.on_log(level, message)
+
+    def _attach_logging(self, client) -> None:
+        """Route this client's paramiko output into the session log.
+
+        A private log channel per connection rather than the global "paramiko"
+        logger: two hosts connecting at once would otherwise interleave their
+        handshakes into both sessions' logs.
+        """
+        if self.on_log is None:
+            return
+        self._log_channel = f"remotely.ssh.{next(_log_channels)}"
+        client.set_log_channel(self._log_channel)
+        logger = logging.getLogger(self._log_channel)
+        logger.setLevel(logging.DEBUG if self.spec.verbose else logging.WARNING)
+        # Ours must be the only handler: propagating would put paramiko's
+        # output on the root logger, and stderr is the drawn UI.
+        logger.propagate = False
+        self._log_handler = _LogForwarder(self.on_log)
+        logger.addHandler(self._log_handler)
+
+    def _detach_logging(self) -> None:
+        if self._log_handler is not None and self._log_channel:
+            logging.getLogger(self._log_channel).removeHandler(self._log_handler)
+        self._log_handler = None
+
+    def _capture_banner(self, client) -> None:
+        """Record the server's pre-auth banner, if it sent one.
+
+        ``Transport.get_banner()`` returns None once the transport is inactive,
+        which is exactly the state a failed authentication leaves it in - and a
+        banner explaining why access was refused is the one most worth showing.
+        So fall back to the auth handler's own copy.
+        """
+        try:
+            transport = client.get_transport()
+            if transport is None:
+                return
+            banner = transport.get_banner()
+            if not banner:
+                handler = getattr(transport, "auth_handler", None)
+                banner = getattr(handler, "banner", None)
+            if not banner:
+                return
+            if isinstance(banner, bytes):
+                banner = banner.decode("utf-8", "replace")
+            self.banner = banner.strip()
+            if self.banner:
+                self._log("banner", self.banner)
+        except Exception:
+            pass
 
     def connect(self, cols: int, rows: int) -> None:
         import paramiko
 
         client = paramiko.SSHClient()
+        self._attach_logging(client)
+        if self.spec.verbose:
+            self._log("info", f"Verbose logging on for {self.spec.target}")
 
         # Trust what the user already trusts, read-only...
         system_known = Path.home() / ".ssh" / "known_hosts"
@@ -199,6 +300,8 @@ class ParamikoTransport:
         if self.spec.key_path:
             pkey = self._load_key(self.spec.key_path, self.spec.key_passphrase)
 
+        auth = "key" if pkey else ("password" if self.spec.password else "agent/default keys")
+        self._log("info", f"Authenticating as {self.spec.username} using {auth}")
         try:
             client.connect(
                 hostname=self.spec.hostname,
@@ -213,7 +316,14 @@ class ParamikoTransport:
                 auth_timeout=self.spec.connect_timeout,
             )
         except Exception as exc:  # paramiko raises a wide family here
+            # Before translating: a banner is often the server explaining the
+            # refusal, and it is lost once the transport is torn down.
+            self._capture_banner(client)
+            self._log("error", f"{type(exc).__name__}: {exc}")
             raise self._translate(exc) from exc
+
+        self._capture_banner(client)
+        self._log("info", "Authenticated.")
 
         try:
             transport = client.get_transport()
@@ -225,6 +335,7 @@ class ParamikoTransport:
             channel.settimeout(0.0)
         except Exception as exc:
             client.close()
+            self._log("error", f"Could not open a shell: {exc}")
             raise TransportError(f"Could not open a shell: {exc}") from exc
 
         # Persist newly learned host keys so the next connection is verified.
@@ -270,7 +381,14 @@ class ParamikoTransport:
         import socket
 
         if isinstance(exc, paramiko.AuthenticationException):
-            return AuthFailed("Authentication failed - check the credential.")
+            # paramiko's own text is usually the bare "Authentication failed.",
+            # but BadAuthenticationType lists what the server *would* accept,
+            # which is the difference between guessing and knowing.
+            detail = str(exc).strip().rstrip(".")
+            base = "Authentication failed - check the credential."
+            if detail and detail.lower() not in ("authentication failed", ""):
+                base = f"{base} Server said: {detail}."
+            return AuthFailed(base)
         if isinstance(exc, paramiko.BadHostKeyException):
             return HostKeyRejected(
                 "Host key does not match the one on record. If this is expected, "
@@ -335,6 +453,9 @@ class ParamikoTransport:
                 self._client.close()
             except Exception:
                 pass
+        # The logger outlives this object, so leaving the handler attached
+        # would keep the session - and its whole log list - alive for the run.
+        self._detach_logging()
 
     @property
     def closed(self) -> bool:
@@ -362,9 +483,20 @@ class SystemSSHTransport:
         self._pid: int | None = None
         self._fd: int | None = None
         self._exit_status: int | None = None
+        #: Set by SessionManager before connect(); called as (level, message).
+        self.on_log = None
+        #: Never set here - system ssh writes its banner straight to the PTY,
+        #: so it lands in the session's own output rather than out of band.
+        self.banner: str = ""
+
+    def _log(self, level: str, message: str) -> None:
+        if self.on_log is not None:
+            self.on_log(level, message)
 
     def argv(self) -> list[str]:
         argv = [self.ssh_binary, "-p", str(self.spec.port), "-tt"]
+        if self.spec.verbose:
+            argv.append("-v")
         options = list(self.spec.ssh_options)
         if not any(o.lower().startswith("stricthostkeychecking") for o in options):
             options.append("StrictHostKeyChecking=accept-new")
@@ -397,6 +529,8 @@ class SystemSSHTransport:
                 f"'{self.ssh_binary}' is not installed. Turn off 'use system ssh' "
                 "for this host to use the built-in SSH client instead."
             )
+
+        self._log("info", f"Running {self.command}")
 
         import pty
         import fcntl

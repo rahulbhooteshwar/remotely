@@ -24,11 +24,23 @@ PROMPT = "$ "
 
 
 class _Server(paramiko.ServerInterface):
-    def __init__(self, password: str | None, public_key: paramiko.PKey | None) -> None:
+    def __init__(
+        self,
+        password: str | None,
+        public_key: paramiko.PKey | None,
+        auth_banner: str = "",
+    ) -> None:
         self.password = password
         self.public_key = public_key
+        self.auth_banner = auth_banner
         self.shell_requested = threading.Event()
         self.pty_size: tuple[int, int] | None = None
+
+    def get_banner(self):
+        """The pre-auth banner, shown before credentials are accepted."""
+        if not self.auth_banner:
+            return (None, None)
+        return (self.auth_banner, "en-US")
 
     def check_channel_request(self, kind: str, chanid: int) -> int:
         if kind == "session":
@@ -79,9 +91,11 @@ class SSHTestServer:
         password: str | None = PASSWORD,
         authorized_key: paramiko.PKey | None = None,
         host_key: paramiko.PKey | None = None,
+        auth_banner: str = "",
     ) -> None:
         self.password = password
         self.authorized_key = authorized_key
+        self.auth_banner = auth_banner
         self.host_key = host_key or paramiko.RSAKey.generate(2048)
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -116,7 +130,7 @@ class SSHTestServer:
     def _session(self, client: socket.socket) -> None:
         transport = paramiko.Transport(client)
         transport.add_server_key(self.host_key)
-        server = _Server(self.password, self.authorized_key)
+        server = _Server(self.password, self.authorized_key, self.auth_banner)
         self.server = server
         try:
             transport.start_server(server=server)

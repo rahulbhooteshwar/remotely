@@ -3203,3 +3203,253 @@ async def test_a_password_credential_drops_a_stale_key_path() -> None:
         cred = saved[0]
         assert cred.kind == "password" and cred.password == "new-pw"
         assert cred.key_path is None and cred.key_passphrase is None
+
+
+# --------------------------------------------------- connection diagnostics
+
+
+async def _failed_session(app, pilot, host_name="dead"):
+    """Connect to a closed port and wait for the failure."""
+    from remotely.tui.terminal import TerminalPane
+
+    app._connect(host_name)
+    for _ in range(400):
+        await pilot.pause()
+        sessions = app.sessions.list()
+        if sessions and sessions[0].status == "error":
+            break
+    session = app.sessions.list()[0]
+    assert session.status == "error", session.status
+    pane = app.query_one(f"#{session.id}", TerminalPane)
+    for _ in range(8):
+        await pilot.pause()
+    return session, pane
+
+
+def _dead_host(app, **overrides):
+    from remotely.models import Host
+
+    fields = dict(name="dead", hostname="127.0.0.1", username="u", port=9,
+                  ssh_options=["ConnectTimeout=3"])
+    fields.update(overrides)
+    app.store.add(Host(**fields))
+
+
+def _pane_text(app, height=26) -> str:
+    comp = app.screen._compositor
+    rows = []
+    for y in range(height):
+        try:
+            rows.append("".join(s.text for s in comp.render_strips()[y]))
+        except Exception:
+            break
+    return "\n".join(rows)
+
+
+async def test_a_failed_connection_records_why_in_the_log() -> None:
+    """The overlay's phrasing is friendly; the log keeps the raw truth."""
+    app = build_app()
+    _dead_host(app)
+    async with app.run_test(size=(90, 26)) as pilot:
+        await pilot.pause()
+        session, pane = await _failed_session(app, pilot)
+
+        entries = session.log_snapshot()
+        assert entries, "nothing was logged"
+        text = " | ".join(m for _l, m in entries)
+        assert "Connecting to" in text, text
+        assert "Authenticating as" in text, text
+        # The underlying exception, not just the translated one-liner.
+        assert "NoValidConnectionsError" in text or "Errno" in text, text
+        assert any(level == "error" for level, _ in entries)
+        app.sessions.close_all()
+
+
+async def test_the_spinner_shows_what_the_handshake_is_doing() -> None:
+    app = build_app()
+    _dead_host(app)
+    async with app.run_test(size=(90, 26)) as pilot:
+        await pilot.pause()
+        app._connect("dead")
+        for _ in range(300):
+            await pilot.pause()
+            sessions = app.sessions.list()
+            if sessions and sessions[0].log_snapshot():
+                break
+        session = app.sessions.list()[0]
+        if session.status == "connecting":
+            assert "Connecting to" in _pane_text(app)
+        # Whatever the timing, the notice is built from the log.
+        from remotely.tui.terminal import TerminalPane
+
+        pane = app.query_one(f"#{session.id}", TerminalPane)
+        assert pane._log_tail(session, 6), "the notice has no log to show"
+        app.sessions.close_all()
+
+
+async def test_the_failure_overlay_can_be_dismissed_to_read_the_log() -> None:
+    app = build_app()
+    _dead_host(app)
+    async with app.run_test(size=(90, 26)) as pilot:
+        await pilot.pause()
+        session, pane = await _failed_session(app, pilot)
+
+        assert pane.shows_log, "a never-connected session should show its log"
+        assert "Could not connect" in _pane_text(app), "no failure panel"
+
+        await pilot.press("escape")
+        for _ in range(10):
+            await pilot.pause()
+
+        body = _pane_text(app)
+        assert "Could not connect" not in body, "the panel did not go away"
+        assert "Connection log" in body, body
+        assert "Authenticating as" in body, "the log is not readable"
+        app.sessions.close_all()
+
+
+async def test_dismissing_keeps_retry_available() -> None:
+    """Closing the panel must not strand the session."""
+    from remotely.tui.terminal import TerminalPane
+
+    app = build_app()
+    _dead_host(app)
+    async with app.run_test(size=(90, 26)) as pilot:
+        await pilot.pause()
+        session, pane = await _failed_session(app, pilot)
+        await pilot.press("escape")
+        for _ in range(8):
+            await pilot.pause()
+
+        retried: list = []
+        app._retry_session = lambda s: retried.append(s)  # type: ignore
+        await pilot.press("r")
+        for _ in range(10):
+            await pilot.pause()
+        assert retried, "r no longer retries once the panel is dismissed"
+        app.sessions.close_all()
+
+
+async def test_the_connection_log_scrolls() -> None:
+    app = build_app()
+    _dead_host(app)
+    async with app.run_test(size=(90, 12)) as pilot:
+        await pilot.pause()
+        session, pane = await _failed_session(app, pilot)
+        for n in range(60):
+            session.log_line("debug", f"filler line {n}")
+        pane.dismiss_overlay()
+        for _ in range(8):
+            await pilot.pause()
+
+        assert "filler line 59" in _pane_text(app, 12), "not anchored to the newest"
+        assert pane._scroll_log(30), "log would not scroll"
+        for _ in range(8):
+            await pilot.pause()
+        assert "filler line 59" not in _pane_text(app, 12), "scrolling did nothing"
+        app.sessions.close_all()
+
+
+async def test_a_verbose_host_is_marked_verbose_on_its_spec() -> None:
+    app = build_app()
+    _dead_host(app, ssh_options=["LogLevel=DEBUG", "ConnectTimeout=3"])
+    async with app.run_test(size=(90, 26)) as pilot:
+        await pilot.pause()
+        session, pane = await _failed_session(app, pilot)
+        assert session.transport.spec.verbose
+        text = " | ".join(m for _l, m in session.log_snapshot())
+        assert "Verbose logging on" in text, text
+        app.sessions.close_all()
+
+
+async def test_a_retry_starts_the_log_over() -> None:
+    """Two runs' lines in one list would be impossible to tell apart."""
+    app = build_app()
+    _dead_host(app)
+    async with app.run_test(size=(90, 26)) as pilot:
+        await pilot.pause()
+        session, pane = await _failed_session(app, pilot)
+        session.log_line("info", "MARKER-FROM-FIRST-ATTEMPT")
+        assert any("MARKER" in m for _l, m in session.log_snapshot())
+
+        from remotely.transport import create_transport
+
+        session.prepare_retry(create_transport(app.store.get("dead"), None), 80, 24)
+        assert not any("MARKER" in m for _l, m in session.log_snapshot())
+        assert session.banner == "" and session.had_shell is False
+        app.sessions.close_all()
+
+
+# ----------------------------------------------------------- searching a session
+
+
+async def test_find_highlights_matches_in_the_theme_colour() -> None:
+    from textual.widgets import Static
+
+    app = build_app()
+    async with app.run_test(size=(80, 20)) as pilot:
+        await pilot.pause()
+        session, pane = await _live_pane(
+            app, pilot, b"ERROR: disk full\r\nfine here\r\nERROR again\r\n"
+        )
+
+        app._run_command("find", "ERROR")
+        for _ in range(10):
+            await pilot.pause()
+
+        assert pane.search_term == "ERROR"
+        assert pane.match_count() == 2, pane.match_count()
+
+        accent = session.theme.accent.lower()
+        comp = app.screen._compositor
+        hits = []
+        for y in range(app.screen.size.height):
+            try:
+                strip = comp.render_strips()[y]
+            except Exception:
+                break
+            for seg in strip:
+                if seg.style and seg.style.bgcolor and "ERROR" in seg.text:
+                    if str(seg.style.bgcolor).lower().find(accent.lstrip("#")) != -1:
+                        hits.append(seg.text)
+        assert hits, "no match was painted in the theme accent"
+
+        status = "".join(
+            seg.text for seg in app.query_one("#status", Static).render_line(0)
+        )
+        assert "2 matches" in status, status
+        app.sessions.close_all()
+
+
+async def test_find_is_case_insensitive_and_clearable() -> None:
+    app = build_app()
+    async with app.run_test(size=(80, 20)) as pilot:
+        await pilot.pause()
+        session, pane = await _live_pane(app, pilot, b"Error one\r\nERROR two\r\n")
+
+        app._run_command("find", "error")
+        for _ in range(10):
+            await pilot.pause()
+        assert pane.match_count() == 2, "search should ignore case"
+
+        pane.set_search("")
+        for _ in range(6):
+            await pilot.pause()
+        assert pane.search_term == ""
+        assert pane.match_count() == 0
+        app.sessions.close_all()
+
+
+async def test_find_on_the_launcher_says_so() -> None:
+    from textual.widgets import Static
+
+    app = build_app()
+    async with app.run_test(size=(80, 20)) as pilot:
+        await pilot.pause()
+        app._run_command("find", "anything")
+        for _ in range(10):
+            await pilot.pause()
+        status = "".join(
+            seg.text for seg in app.query_one("#status", Static).render_line(0)
+        )
+        assert "session tab" in status, status

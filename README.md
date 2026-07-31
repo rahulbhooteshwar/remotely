@@ -203,6 +203,8 @@ The input at the top is the only control surface. It completes as you type.
 | `Ctrl+L` | open sessions |
 | `F1` | help |
 | `Ctrl+Shift+K` | clear the session's screen and scrollback (also forces a full redraw) |
+| `Ctrl+Shift+F` | highlight text in the current session |
+| `Esc` | dismiss a failure panel, leaving the connection log readable |
 | `Ctrl+Q` | quit, closing all sessions |
 
 ### Commands
@@ -215,6 +217,7 @@ The input at the top is the only control surface. It completes as you type.
 /sessions         switch or close tabs     /export <path>   export hosts
 /close [host]     close a tab              /import <path>   import hosts
 /clear            clear this tab's screen
+/find [text]      highlight text in this tab
 /help  /quit
 ```
 
@@ -222,6 +225,29 @@ The input at the top is the only control surface. It completes as you type.
 use **Close Selected Tab** / **Close All Tabs** to close them without leaving -
 the list refreshes and stays open so you can close several in a row. **Ok**
 leaves the dialog and touches nothing.
+
+### When a connection fails
+
+The pane keeps a log of the handshake: what it was doing, the server's pre-auth
+banner if it sent one, and the raw error underneath the friendly summary. While
+connecting, the last few lines sit under the spinner, so a slow handshake shows
+what it is waiting on.
+
+If it fails, a panel names the problem and offers **Retry**. Press `Esc` to
+dismiss the panel - the log stays behind it and is scrollable with the wheel,
+the arrows, `PageUp`/`PageDown` and `Home`/`End`, so the panel can never hide
+the thing that explains the failure.
+
+Add `LogLevel=DEBUG` (or just `-v`) to a host's **SSH options** and the log also
+carries the client's own handshake output - key exchange, the auth methods
+tried, what the server rejected.
+
+### Searching a session
+
+`Ctrl+Shift+F`, or `/find <text>`, highlights every match on the visible screen
+in the session's own theme colour, and the status line says how many there are.
+Matching ignores case. `/find` with nothing after it opens a prompt; clear the
+prompt to turn the highlight off.
 
 ### Clearing a session
 

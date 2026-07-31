@@ -23,6 +23,14 @@ from .transport import Transport, TransportError, create_transport
 
 Status = Literal["connecting", "connected", "closed", "error"]
 
+#: Levels a connection log line can carry, in the order the UI colours them.
+LogLevel = Literal["info", "banner", "debug", "error"]
+
+#: Lines kept per session. A verbose paramiko handshake runs to a few hundred;
+#: this is generous for that and still bounded, because a long-lived session
+#: keeps logging (keepalives, rekeys) and nothing else ever trims it.
+LOG_LIMIT = 800
+
 _ids = itertools.count(1)
 
 
@@ -42,6 +50,15 @@ class Session:
     status: Status = "connecting"
     error: str | None = None
     notes: list[str] = field(default_factory=list)
+    #: What happened while connecting: progress, the server's banner, the raw
+    #: failure, and paramiko's own output when the host asked for verbose.
+    log: list[tuple[str, str]] = field(default_factory=list)
+    #: The server's pre-auth banner, kept apart from the log so the failure
+    #: overlay can show it without the user going looking.
+    banner: str = ""
+    #: True once a shell was actually open. Distinguishes "never got in" from
+    #: "was in and got dropped", which want different things on screen.
+    had_shell: bool = False
     _buffer: list[bytes] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _reader: threading.Thread | None = None
@@ -87,6 +104,25 @@ class Session:
         if "not installed" in error:
             return ["Turn off 'use system ssh' for this host to use the built-in client."]
         return []
+
+    # -------------------------------------------------------------------- log
+
+    def log_line(self, level: str, text: str) -> None:
+        """Record a connection event. Called from the connect thread.
+
+        Shares the buffer lock with the byte stream because both are written
+        off the UI thread and read on it.
+        """
+        for line in str(text).splitlines() or [""]:
+            with self._lock:
+                self.log.append((level, line.rstrip()))
+                if len(self.log) > LOG_LIMIT:
+                    del self.log[: len(self.log) - LOG_LIMIT]
+
+    def log_snapshot(self) -> list[tuple[str, str]]:
+        """A copy for the UI thread to render without holding the lock."""
+        with self._lock:
+            return list(self.log)
 
     # ------------------------------------------------------------------ bytes
 
@@ -181,6 +217,11 @@ class Session:
         self.emulator = TerminalEmulator(cols, rows)
         self.status = "connecting"
         self.error = None
+        # A retry is a fresh attempt; keeping the failed one's log would make
+        # it impossible to tell which run a line came from.
+        self.log = []
+        self.banner = ""
+        self.had_shell = False
         spec = getattr(transport, "spec", None)
         self.notes = list(spec.notes) if spec is not None else []
 
@@ -285,20 +326,31 @@ class SessionManager:
     ) -> None:
         """Run the connect off the UI thread and record how it went."""
         transport = session.transport
+        # The transport reports progress, the server's banner and - when the
+        # host asked for verbose - paramiko's own output through this. Set
+        # before connect() so nothing from the handshake is missed.
+        setattr(transport, "on_log", session.log_line)
 
         def connect() -> None:
+            target = session.target_hint or session.host_name
+            session.log_line("info", f"Connecting to {target}")
             try:
                 transport.connect(cols, rows)
             except TransportError as exc:
                 session.status = "error"
                 session.error = str(exc)
+                session.log_line("error", str(exc))
             except Exception as exc:
                 session.status = "error"
                 session.error = f"Unexpected error: {exc}"
+                session.log_line("error", f"Unexpected error: {exc}")
             else:
                 session.status = "connected"
+                session.had_shell = True
+                session.log_line("info", "Shell open.")
                 session.start_reader()
             finally:
+                session.banner = getattr(transport, "banner", "") or session.banner
                 if on_ready is not None:
                     on_ready(session)
 

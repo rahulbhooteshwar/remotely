@@ -102,6 +102,13 @@ class TerminalPane(Widget, can_focus=True):
         self._selection_cache: Style | None = None
         #: Rows the retry button occupies, so a click can be mapped back to it.
         self._retry_rows: set[int] = set()
+        #: Failure panel dismissed, so the log underneath can be read.
+        self._overlay_hidden = False
+        #: Rows paged back from the end of the connection log.
+        self._log_offset = 0
+        #: Highlighted search term, empty when search is off.
+        self.search_term = ""
+        self._match_cache: Style | None = None
 
     # ------------------------------------------------------------------ setup
 
@@ -124,6 +131,8 @@ class TerminalPane(Widget, can_focus=True):
         self._last_status = ""
         self._started = time.monotonic()
         self._retry_rows.clear()
+        self._overlay_hidden = False
+        self._log_offset = 0
         self._sync_size()
         self.refresh()
         self.focus()
@@ -253,10 +262,16 @@ class TerminalPane(Widget, can_focus=True):
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         event.stop()
+        if self.shows_log:
+            self._scroll_log(LOG_WHEEL_STEPS)
+            return
         self._scroll(WHEEL_STEPS)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         event.stop()
+        if self.shows_log:
+            self._scroll_log(-LOG_WHEEL_STEPS)
+            return
         self._scroll(-WHEEL_STEPS)
 
     # ---------------------------------------------------------------- keyboard
@@ -280,6 +295,18 @@ class TerminalPane(Widget, can_focus=True):
                 event.prevent_default()
                 event.stop()
                 self.post_message(self.RetryRequested(session))
+                return
+            if self.is_dead and event.key == "escape":
+                # Get the panel out of the way so what it covers can be read.
+                event.prevent_default()
+                event.stop()
+                self.dismiss_overlay()
+                return
+            if self.shows_log and event.key in LOG_SCROLL_KEYS:
+                event.prevent_default()
+                event.stop()
+                self._scroll_log(LOG_SCROLL_KEYS[event.key])
+                return
             return
 
         # Leave the app's own escape hatches alone so the user is never trapped
@@ -370,18 +397,63 @@ class TerminalPane(Widget, can_focus=True):
         if session.status == "connecting":
             return self._render_notice(y)
 
+        # A failed handshake leaves the emulator empty, so the connection log
+        # is the body of the pane - under the overlay, and still there when the
+        # overlay is dismissed.
+        body_is_log = self.shows_log
+
         emulator = session.emulator
-        if y >= emulator.rows:
+        if not body_is_log and y >= emulator.rows:
             return Strip.blank(self.size.width, self._blank_style)
 
-        if self.is_dead:
+        if self.is_dead and not self._overlay_hidden:
             overlay = self._overlay_strip(y)
             if overlay is not None:
                 return overlay
 
+        if body_is_log:
+            return self._log_strip(y)
+
         return Strip(self._terminal_segments(y), emulator.cols).adjust_cell_length(
             self.size.width, self._blank_style
         )
+
+    def _log_rows(self) -> list[tuple[str, str]]:
+        """Header plus every log line, as ``(level, text)``."""
+        session = self.session
+        rows: list[tuple[str, str]] = [
+            ("label", f"Connection log - {session.host_name}"),
+            ("info", ""),
+        ]
+        rows += session.log_snapshot()
+        return rows
+
+    def _log_strip(self, y: int) -> Strip:
+        """One row of the connection log, honouring the scroll offset."""
+        rows = self._log_rows()
+        height = max(self.size.height, 1)
+        # Anchored to the bottom like a terminal: the newest lines are the
+        # interesting ones, and _log_offset pages back from there.
+        first = max(0, len(rows) - height) - self._log_offset
+        first = max(0, first)
+        index = first + y
+        if index >= len(rows):
+            return Strip.blank(self.size.width, self._blank_style)
+        level, text = rows[index]
+        style = Style(bgcolor=self._bg_default) + self._log_style(level)
+        return Strip(
+            [Segment(" " + text, style)]
+        ).adjust_cell_length(self.size.width, self._blank_style)
+
+    def _scroll_log(self, steps: int) -> bool:
+        rows = len(self._log_rows())
+        limit = max(0, rows - max(self.size.height, 1))
+        target = max(0, min(limit, self._log_offset + steps))
+        if target == self._log_offset:
+            return False
+        self._log_offset = target
+        self.refresh()
+        return True
 
     def _terminal_segments(self, y: int) -> list[Segment]:
         """One row of the emulator as styled segments."""
@@ -407,6 +479,8 @@ class TerminalPane(Widget, can_focus=True):
                 if select_to == -1:
                     select_to = len(cells)
 
+        match_spans = self._match_spans(cells)
+
         segments: list[Segment] = []
         run: list[str] = []
         run_style: Style | None = None
@@ -424,6 +498,8 @@ class TerminalPane(Widget, can_focus=True):
 
         for x, cell in enumerate(cells):
             style = _style_for(cell, self._bg_default, self._fg_default)
+            if any(start <= x < end for start, end in match_spans):
+                style = style + self._match_style()
             if select_from <= x < select_to:
                 style = style + self._selection_style()
             if show_cursor and x == cursor_x:
@@ -439,12 +515,95 @@ class TerminalPane(Widget, can_focus=True):
         flush(len(cells))
         return segments
 
+    # ------------------------------------------------------------------ search
+
+    def _match_style(self) -> Style:
+        """Highlight for a search hit, built from the session's own theme.
+
+        Cached because it is asked for per cell. The theme's accent is the
+        colour that already means "this session" everywhere else - tab, border,
+        launcher stripe - so a hit reads as part of the same scheme rather than
+        an arbitrary yellow. Foreground is the theme's dark pane background, so
+        the text stays legible on the accent whatever the accent is.
+        """
+        if self._match_cache is None:
+            self._match_cache = Style(
+                bgcolor=self.session.theme.accent,
+                color=self._bg_default,
+                bold=True,
+            )
+        return self._match_cache
+
+    def _match_spans(self, cells: list[Cell]) -> list[tuple[int, int]]:
+        """``(start, end)`` cell ranges on this row matching the search term."""
+        term = self.search_term
+        if not term:
+            return []
+        haystack = "".join(cell.char for cell in cells).lower()
+        needle = term.lower()
+        spans: list[tuple[int, int]] = []
+        start = haystack.find(needle)
+        while start != -1:
+            spans.append((start, start + len(needle)))
+            start = haystack.find(needle, start + len(needle))
+        return spans
+
+    def set_search(self, term: str) -> int:
+        """Highlight ``term`` in this pane. Returns how many rows matched."""
+        self.search_term = term.strip()
+        self.refresh()
+        return self.match_count()
+
+    def match_count(self) -> int:
+        """Matches on the visible screen."""
+        if not self.search_term:
+            return 0
+        emulator = self.session.emulator
+        total = 0
+        for y in range(emulator.rows):
+            try:
+                total += len(self._match_spans(emulator.line(y)))
+            except Exception:
+                continue
+        return total
+
     # ----------------------------------------------------------------- overlay
 
     @property
     def is_dead(self) -> bool:
         """Whether the connection is gone and the pane should offer a retry."""
         return self.session.status in ("error", "closed")
+
+    @property
+    def shows_log(self) -> bool:
+        """Whether the pane body is the connection log rather than a terminal.
+
+        A session that never got a shell has nothing in its emulator, so the
+        log is the only thing worth showing once the overlay is dismissed. One
+        that connected and later died has real output to go back to.
+        """
+        return (
+            self.is_dead
+            and not self.session.had_shell
+            and bool(self.session.log_snapshot())
+        )
+
+    @staticmethod
+    def _log_style(level: str) -> Style:
+        return LOG_STYLES.get(level, LOG_STYLES["info"])
+
+    @staticmethod
+    def _log_tail(session, count: int) -> list[tuple[str, str]]:
+        """The last `count` log entries, skipping blank filler."""
+        entries = [(lvl, text) for lvl, text in session.log_snapshot() if text]
+        return entries[-count:]
+
+    def dismiss_overlay(self) -> None:
+        """Hide the failure panel, leaving whatever is underneath readable."""
+        if self.is_dead and not self._overlay_hidden:
+            self._overlay_hidden = True
+            self._retry_rows.clear()
+            self.refresh()
 
     def overlay_lines(self) -> list[tuple[str, str]]:
         """Rows of the disconnected overlay, as ``(text, role)`` pairs.
@@ -474,6 +633,14 @@ class TerminalPane(Widget, can_focus=True):
             if status is not None and status > 0:
                 rows.append((f"Remote exited with status {status}.", "body"))
 
+        if session.banner:
+            # The server's own words about why you are being turned away, which
+            # is often the only thing that explains the refusal.
+            rows.append(("", "blank"))
+            rows.append(("Server banner", "label"))
+            for line in session.banner.splitlines()[:BANNER_LINES]:
+                rows.append((line.rstrip(), "banner"))
+
         if session.target_hint:
             rows.append((session.target_hint, "dim"))
         for hint in session.failure_hints():
@@ -481,7 +648,10 @@ class TerminalPane(Widget, can_focus=True):
 
         rows.append(("", "blank"))
         rows.append(("[ Retry ]", "button"))
-        rows.append(("r retry     ctrl+w launcher     ctrl+shift+w close", "dim"))
+        keys = "r retry     ctrl+w launcher     ctrl+shift+w close"
+        if self.shows_log:
+            keys = "r retry     esc read the log     ctrl+w launcher"
+        rows.append((keys, "dim"))
         return rows
 
     def _overlay_geometry(self) -> tuple[int, int, int, int, list[tuple[str, str]]]:
@@ -559,13 +729,22 @@ class TerminalPane(Widget, can_focus=True):
 
         if session.status == "connecting":
             frame = spinner_frame(time.monotonic() - self._started)
-            return [
+            lines: list[tuple[str, Style]] = [
                 (f"{frame}  Connecting to {session.host_name}", accent),
                 ("", dim),
                 (session.target_hint, dim),
-                ("", dim),
-                ("ctrl+w returns to the launcher", dim),
             ]
+            # The tail of the connection log, so a slow handshake shows what it
+            # is waiting on instead of an unexplained spinner. Only the tail:
+            # a verbose handshake is hundreds of lines and this is a centred
+            # notice, not a scrollable view - the full log is behind the
+            # overlay if it ends badly.
+            tail = self._log_tail(session, LIVE_LOG_LINES)
+            if tail:
+                lines.append(("", dim))
+                lines += [(text, self._log_style(level)) for level, text in tail]
+            lines += [("", dim), ("ctrl+w returns to the launcher", dim)]
+            return lines
 
         lines: list[tuple[str, Style]] = [
             (f"Could not connect to {session.host_name}", bad),
@@ -595,6 +774,38 @@ class TerminalPane(Widget, can_focus=True):
             [Segment(" " * pad, bg), Segment(text, bg + style)]
         ).adjust_cell_length(width, self._blank_style)
 
+
+#: Log lines shown under the spinner while connecting. The full log is behind
+#: the failure overlay; this is a live hint, not a viewer.
+LIVE_LOG_LINES = 6
+
+#: Banner lines shown in the failure overlay before it is truncated.
+BANNER_LINES = 8
+
+#: Colours per log level. Debug recedes so a verbose handshake does not drown
+#: the two or three lines that actually say what happened.
+LOG_STYLES: dict[str, Style] = {
+    "info": Style(color="#8b98b0"),
+    "debug": Style(color="#55617a"),
+    "banner": Style(color="#d2a8ff"),
+    "error": Style(color="#ff7b72", bold=True),
+    "label": Style(color="#7aa2f7", bold=True),
+}
+
+#: Rows the wheel moves in the connection log.
+LOG_WHEEL_STEPS = 3
+
+#: Keys that page the connection log, and how far each moves.
+LOG_SCROLL_KEYS = {
+    "up": 1,
+    "down": -1,
+    "pageup": 10,
+    "pagedown": -10,
+    "shift+pageup": 10,
+    "shift+pagedown": -10,
+    "home": 10_000,
+    "end": -10_000,
+}
 
 #: Markers a terminal wraps pasted text in when the remote enables DECSET 2004.
 BRACKET_START = b"\x1b[200~"
